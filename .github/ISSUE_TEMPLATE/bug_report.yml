@@ -1,0 +1,41 @@
+name: Bug report
+description: Report a reproducible problem with vLLM SAIL.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check existing issues first. Include a small reproducer and remove credentials, private host details and confidential model paths from logs.
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include the plugin revision, vLLM version, PPU device and count, SDK version, SAIL PyTorch version, and collect_env output.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Include the exact command or minimal script, checkpoint and revision, dtype, quantization and parallelism.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and logs
+      description: Include the relevant traceback and whether the issue is reproducible.
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Checks already run
+      description: List environment, build, unit, device or model checks and their actual results. Include skip reasons where relevant.

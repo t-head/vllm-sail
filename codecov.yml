@@ -1,0 +1,10 @@
+coverage:
+  status:
+    # Patch coverage is voting and must remain at or above 80%.
+    patch:
+      default:
+        target: 80%
+    # Project coverage is reported for visibility but does not block changes.
+    project:
+      default:
+        informational: true

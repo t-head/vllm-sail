@@ -1,0 +1,95 @@
+# Configuration
+
+Set environment variables before starting vLLM so the server and worker processes
+inherit the same configuration. Runtime defaults are defined in
+[`vllm_sail/envs.py`](../../vllm_sail/envs.py).
+
+Every `VLLM_SAIL_*` runtime variable accepts the corresponding `VLLM_PPU_*`
+name for compatibility. The SAIL name takes precedence whenever it is set,
+including `0` or an empty string. An empty boolean is false; an empty backend
+selection uses its default. Boolean truthy values are `true`, `1`, `yes` and
+`on`, case-insensitively. `is_set()` recognizes either name, and `snapshot()`
+reports effective values under SAIL names. `VLLM_DEEPEPLL_RECV_HOOK` keeps its
+shared upstream name.
+
+## Plugin discovery
+
+vLLM discovers the installed plugin through package entry points. If you use
+vLLM's plugin allowlist, include `ppu`:
+
+```bash
+export VLLM_PLUGINS=ppu
+```
+
+The same name enables platform discovery and the general hook that installs
+registrations and model integrations. Include any other plugins needed by your
+application in the allowlist.
+
+## Backend selection
+
+| Variable | Default | Values / behavior |
+| --- | --- | --- |
+| `VLLM_SAIL_MOE_BACKEND` | Automatic | `deepgemm`, `acext`, `triton` |
+| `VLLM_SAIL_DENSE_BACKEND` | Automatic | `deepgemm`, `acext`, `triton` |
+| `VLLM_SAIL_DENSE_BF16_DEEPGEMM` | `0` | Opt into the PPU 1.5 BF16 dense DeepGEMM path |
+| `VLLM_SAIL_DEEPGEMM_MOE_TP_FUSED` | `1` | Enable the supported fused tensor-parallel MoE path |
+| `VLLM_SAIL_USE_PLA` | `1` | Allow PLA linear-attention paths where available |
+| `VLLM_SAIL_FUSED_RMSNORM_QUANT` | `0` | Enable supported fused RMSNorm and quantization paths |
+| `VLLM_SAIL_USE_OPT_TOKEN_GROUP_QUANT` | `0` | Enable the optimized token-group quantization path |
+| `VLLM_SAIL_USE_TRITON_INT8_QUANT` | `1` | Use Triton dynamic per-token INT8 quantization |
+| `VLLM_DEEPEPLL_RECV_HOOK` | `1` | Use the deferred receive hook; `0` selects the event-based fallback |
+
+For example, to request the MoE DeepGEMM backend:
+
+```bash
+VLLM_SAIL_MOE_BACKEND=deepgemm vllm serve /path/to/model
+```
+
+Leave backend variables unset for normal capability-based selection. An explicit
+choice still requires the corresponding library, device support and compatible
+tensor layout. Avoid setting overlapping backend controls while diagnosing a
+selection issue.
+
+## Compatibility controls
+
+| Variable | Default | Behavior |
+| --- | --- | --- |
+| `VLLM_SAIL_DISABLE_MOE_WNA16_CUDA` | `0` | Disable the native WNA16 MoE path |
+| `VLLM_SAIL_FORCE_MOE_WNA16_CUDA` | `0` | Request the native WNA16 path; raises if the kernel is unavailable |
+| `VLLM_SAIL_ENABLE_MOE_MARLIN` | `0` | Legacy selection gate; does not enable excluded native Marlin kernels |
+| `VLLM_SAIL_FUSED_GDN_DECODE` | `1` | Legacy getter; dispatch now uses `VLLM_SAIL_USE_PLA` |
+
+## Profiling
+
+| Variable | Default | Behavior |
+| --- | --- | --- |
+| `VLLM_SAIL_NVTX_PROFILE` | `0` | Enable optional NVTX instrumentation |
+| `VLLM_SAIL_NVTX_DUMP_TOPK` | `0` | Include top-k details in NVTX labels |
+| `VLLM_SAIL_NVTX_VFA_DUMP_SEQLEN` | `0` | Include sequence lengths in FlashAttention NVTX labels |
+
+`SAIL_NVTX_PROFILE` is also accepted, after `VLLM_PPU_NVTX_PROFILE` in precedence.
+The profiling integration requires the optional `nvtx` package; install it with
+`python -m pip install --no-build-isolation -e '.[profiling]'` from the repository
+root. The SAIL SDK's optional `model_prof` package adds iteration hooks.
+
+## Version metadata
+
+Release installations should report their version directly. If a source build
+has ambiguous version metadata, `VLLM_VERSION` can state its actual upstream
+release base. For example, use `VLLM_VERSION=0.27.1` only for a checkout verified
+to be based on that release. This override changes the version check; it does
+not make an incompatible checkout supported.
+
+## Inspect the active environment
+
+```bash
+python -c "from vllm_sail import collect_env; collect_env()"
+```
+
+The report includes versions, device information, SDK package availability and
+the PPU environment-variable snapshot. Package presence is a discovery check;
+successful loading and execution require the
+[verification steps](verification_guide.md).
+
+Build-time settings such as `PPU_SDK`, `HGCC`, `CMAKE_HGCC_DIR` and
+`PYTORCH_SAIL_ARCH` are documented in [HGGC kernels](../developer_guide/kernels.md#build-settings).

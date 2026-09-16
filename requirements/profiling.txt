@@ -1,0 +1,3 @@
+nvtx
+
+# model_prof ships with the PPU SDK; it is not installed from PyPI here.

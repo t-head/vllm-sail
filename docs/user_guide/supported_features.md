@@ -1,0 +1,70 @@
+# Supported Features
+
+This page describes implemented PPU integration paths and their constraints.
+An implementation entry is not a qualification of every device, SDK version or
+checkpoint. Use the [verification guide](verification_guide.md) to establish
+support for a specific deployment.
+
+## Platform and compatibility
+
+| Component | Scope |
+| --- | --- |
+| Hardware | PPU cards ZW-810, ZW-810E and ZW-890 |
+| Native targets | PPU 1.0 (`ppu_10`) and PPU 1.5 (`ppu_15`) |
+| Bundled tuning data | Configurations include `PPU-ZW810`, `PPU-ZW810E` and `ZW-M890P`; coverage varies by shape and backend |
+| vLLM | `>=0.27.0,<0.28.0`; generated native sources pinned to v0.27.1 |
+| Python | 3.10–3.13 for the plugin and CPU test matrix; SDK wheel availability determines runtime combinations |
+
+A tuned configuration describes a measured kernel shape. It does not establish
+full-model compatibility. A missing configuration may use backend defaults and
+need workload-specific tuning.
+
+## Compute and attention
+
+| Area | Implementation | Requirements and limits |
+| --- | --- | --- |
+| Dense linear layers | PPU DeepGEMM, ACEXT and Triton paths | Selection depends on precision, tensor layout, device and installed libraries |
+| Mixture of experts | PPU backends for unquantized and selected quantized experts | Backend support varies with expert shape and quantization format |
+| FlashAttention | PPU FlashAttention 2 and 3 integration | Matching SDK libraries; version selection follows availability and model constraints |
+| MLA and sparse attention | PPU FlashMLA integration and sparse indexer | Matching PPU libraries; FP8 dense FlashMLA decode is unavailable |
+| Gated delta networks | PLA and Triton paths for GDN | PLA availability and supported shapes determine dispatch |
+| Kimi delta attention | PLA and Triton paths for KDA | Backend and sequence-shape constraints apply |
+| Native operations | HGGC activation, normalization, quantization, routing, cache, sampling and model-specific kernels | Only the selected source corpus is compiled; each changed kernel needs device correctness tests |
+| Distributed MoE | DeepEP integration, including low-latency receive handling | Compatible PPU communication libraries and a validated multi-device setup |
+
+## Precision and quantization
+
+| Format | Implemented scope | Constraints |
+| --- | --- | --- |
+| BF16 / FP16 | Dense, attention and unquantized MoE paths | Individual backends may accept only a subset; BF16 dense DeepGEMM is opt-in on PPU 1.5 |
+| INT8 | Quantized dense and MoE compute | Scaling mode and weight layout must match the selected backend |
+| FP8 | Dense, MoE and selected cache paths | Device-specific representation and scaling requirements; not every attention path accepts FP8 |
+| MXFP4 | PPU DeepGEMM dense and MoE paths | Requires the matching library and checkpoint layout |
+| INT4 W4A16 | Selected mixed-precision MoE paths | The compressed-tensors path accepts symmetric group-size-32 weights without zero points, expert bias or activation ordering |
+
+Checkpoint format support is specific to the implementation. Weight repacking
+alone does not establish execution support. Native Marlin execution remains
+unavailable; do not infer general GPTQ or AWQ coverage from packing utilities.
+
+## Model integration
+
+| Model family or path | PPU integration |
+| --- | --- |
+| Dense and MoE models | Upstream vLLM architectures using the applicable PPU operators and backends |
+| DeepSeek V4 | Model, MTP and DSpark registrations, with PPU attention, routing and cache paths |
+| MiniMax M3 | Optional model registrations, quantization mapping and native attention-related operations |
+| Qwen hybrid models | GDN attention and selected quantization and speculative-decoding adaptations |
+| Kimi K3 | KDA attention and native MLA/cache operations |
+| Mamba / Jamba | HGGC selective-scan source integration |
+
+Model registration and kernel availability are separate checks. Record the exact
+checkpoint revision, quantization, context length, parallelism and SDK when
+reporting a successful model run. Newly compiled model-specific operations need
+numerical and model-level validation on each target device.
+
+## Selecting a backend
+
+See [Configuration](configuration.md) for runtime choices and defaults. Build
+coverage is defined by the [native source manifests](../developer_guide/kernels.md#source-ownership);
+an excluded operation fails with a capability diagnostic rather than being
+enabled by an environment variable.

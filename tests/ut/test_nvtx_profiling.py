@@ -1,0 +1,562 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Tests for the opt-in NVTX profiling subpackage (Phase-1 decision Q6).
+
+Everything here runs on a bare CPU runner: no vLLM, no ``nvtx`` and no
+``model_prof`` are required. The fork's engine/worker/scheduler NVTX hunks
+became delegating ``@patch`` modules under ``vllm_sail/profiling/`` that
+install nothing unless ``VLLM_PPU_NVTX_PROFILE`` is set, so the tests cover:
+
+* gate off -> ``install()`` patches nothing;
+* gate on  -> every patch lands on its (faked) upstream target;
+* the shared helpers degrade to no-ops without the optional dependencies.
+"""
+
+from __future__ import annotations
+
+import functools
+import importlib
+import importlib.util
+import logging
+import sys
+import types
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+from vllm_sail.patch.utils import PATCH_MARKER, PATCH_REGISTRY, original_of
+
+GATE_VARS = ("VLLM_SAIL_NVTX_PROFILE", "VLLM_PPU_NVTX_PROFILE", "SAIL_NVTX_PROFILE")
+
+# PPU hosts ship nvtx/model_prof; the absence paths below are only
+# exercisable on bare runners, so skip them where the deps exist.
+_PROF_DEPS_PRESENT = (
+    importlib.util.find_spec("nvtx") is not None
+    or importlib.util.find_spec("model_prof") is not None
+)
+skip_with_prof_deps = pytest.mark.skipif(
+    _PROF_DEPS_PRESENT,
+    reason="nvtx/model_prof installed; absence paths need a bare runner",
+)
+
+PROFILING_TARGETS = (
+    "vllm.model_executor.layers.linear.ReplicatedLinear.forward",
+    "vllm.model_executor.layers.linear.ColumnParallelLinear.forward",
+    "vllm.model_executor.layers.linear.RowParallelLinear.forward",
+    "vllm.model_executor.layers.fused_moe.modular_kernel.FusedMoEKernelModularImpl.apply",
+    "vllm.v1.core.sched.scheduler.Scheduler.schedule",
+    "vllm.v1.core.sched.scheduler.Scheduler._update_after_schedule",
+    "vllm.v1.engine.core.EngineCore.__init__",
+    "vllm.v1.engine.core.EngineCore.step",
+    "vllm.v1.engine.core.EngineCore.step_with_batch_queue",
+    "vllm.v1.worker.gpu_model_runner.GPUModelRunner.__init__",
+    "vllm.v1.worker.gpu_model_runner.GPUModelRunner._prepare_inputs",
+    "vllm.v1.worker.gpu_model_runner.GPUModelRunner._sample",
+    "vllm.v1.worker.gpu_model_runner.GPUModelRunner._model_forward",
+    "vllm.v1.worker.gpu_model_runner.GPUModelRunner.execute_model",
+)
+
+PROFILING_SUBMODULES = (
+    "vllm_sail.profiling.linear",
+    "vllm_sail.profiling.modular_moe",
+    "vllm_sail.profiling.moe",
+    "vllm_sail.profiling.nvtx",
+    "vllm_sail.profiling.engine_core",
+    "vllm_sail.profiling.model_runner",
+    "vllm_sail.profiling.scheduler",
+)
+
+
+def _sched_output(**overrides: Any) -> SimpleNamespace:
+    defaults = {
+        "scheduled_new_reqs": [],
+        "total_num_scheduled_tokens": 5,
+        "num_scheduled_tokens": {"r1": 5},
+        "scheduled_spec_decode_tokens": {},
+        "finished_req_ids": set(),
+    }
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
+@pytest.fixture
+def cleared_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in GATE_VARS:
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture
+def fake_vllm(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    """A minimal fake vLLM tree carrying the three patch targets."""
+
+    def package(name: str) -> types.ModuleType:
+        module = types.ModuleType(name)
+        module.__path__ = []  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, name, module)
+        return module
+
+    def plain(name: str) -> types.ModuleType:
+        module = types.ModuleType(name)
+        monkeypatch.setitem(sys.modules, name, module)
+        return module
+
+    vllm = package("vllm")
+    vllm_logger = plain("vllm.logger")
+    vllm_logger.init_logger = logging.getLogger
+    vllm.logger = vllm_logger
+
+    package("vllm.v1")
+    package("vllm.v1.worker")
+    package("vllm.v1.engine")
+    package("vllm.v1.core")
+    package("vllm.v1.core.sched")
+
+    class GPUModelRunner:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self.init_args = (args, kwargs)
+
+        def _prepare_inputs(self, scheduler_output, num_scheduled_tokens):
+            return ("prepare_inputs", scheduler_output, num_scheduled_tokens)
+
+        def _sample(self, logits, spec_decode_metadata):
+            return ("sample", logits, spec_decode_metadata)
+
+        def _model_forward(self, *args: Any, **kwargs: Any):
+            return ("forward", args, kwargs)
+
+        def execute_model(self, scheduler_output, intermediate_tensors=None):
+            return ("execute_model", scheduler_output, intermediate_tensors)
+
+    class EngineCore:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self.init_args = (args, kwargs)
+
+        def step(self):
+            return ("step",)
+
+        def step_with_batch_queue(self):
+            return ("step_with_batch_queue",)
+
+    class Scheduler:
+        def schedule(self, throttle_prefills: bool = False):
+            return ("schedule", throttle_prefills)
+
+        def _update_after_schedule(self, scheduler_output):
+            self.last_update = scheduler_output
+
+    package("vllm.model_executor")
+    package("vllm.model_executor.layers")
+    package("vllm.model_executor.layers.fused_moe")
+    linear = plain("vllm.model_executor.layers.linear")
+    for name in ("ReplicatedLinear", "ColumnParallelLinear", "RowParallelLinear"):
+        setattr(linear, name, type(name, (), {"forward": lambda *a: None}))
+    modular = plain("vllm.model_executor.layers.fused_moe.modular_kernel")
+    modular.FusedMoEKernelModularImpl = type(
+        "FusedMoEKernelModularImpl", (), {"apply": lambda *a: None}
+    )
+
+    runner_module = plain("vllm.v1.worker.gpu_model_runner")
+    runner_module.GPUModelRunner = GPUModelRunner
+    core_module = plain("vllm.v1.engine.core")
+    core_module.EngineCore = EngineCore
+    scheduler_module = plain("vllm.v1.core.sched.scheduler")
+    scheduler_module.Scheduler = Scheduler
+
+    return SimpleNamespace(
+        GPUModelRunner=GPUModelRunner,
+        EngineCore=EngineCore,
+        Scheduler=Scheduler,
+        originals={
+            "GPUModelRunner.__init__": GPUModelRunner.__init__,
+            "GPUModelRunner._prepare_inputs": GPUModelRunner._prepare_inputs,
+            "GPUModelRunner._sample": GPUModelRunner._sample,
+            "GPUModelRunner._model_forward": GPUModelRunner._model_forward,
+            "GPUModelRunner.execute_model": GPUModelRunner.execute_model,
+            "EngineCore.__init__": EngineCore.__init__,
+            "EngineCore.step": EngineCore.step,
+            "EngineCore.step_with_batch_queue": EngineCore.step_with_batch_queue,
+            "Scheduler.schedule": Scheduler.schedule,
+            "Scheduler._update_after_schedule": Scheduler._update_after_schedule,
+        },
+    )
+
+
+@pytest.fixture
+def nvtx_stub(monkeypatch: pytest.MonkeyPatch) -> dict[str, list]:
+    """Fake `nvtx` package recording mark/annotate usage."""
+    calls: dict[str, list] = {"marks": [], "annotated": []}
+    stub = types.ModuleType("nvtx")
+
+    def mark(message: str, **kwargs: Any) -> None:
+        calls["marks"].append(message)
+
+    def annotate(name: str, **kwargs: Any):
+        calls["annotated"].append(name)
+
+        def decorator(func):
+            @functools.wraps(func)
+            def wrapper(*args, **kw):
+                return func(*args, **kw)
+
+            return wrapper
+
+        return decorator
+
+    stub.mark = mark
+    stub.annotate = annotate
+    monkeypatch.setitem(sys.modules, "nvtx", stub)
+    return calls
+
+
+@pytest.fixture
+def profiling_pkg(fake_vllm: SimpleNamespace, monkeypatch: pytest.MonkeyPatch):
+    """Import vllm_sail.profiling fresh, with the gate flag reset."""
+    module = importlib.import_module("vllm_sail.profiling")
+    for name in PROFILING_SUBMODULES:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    # `from vllm_sail.profiling import engine_core, ...` resolves via these
+    # attributes first; drop them too so install() re-imports the submodules
+    # against this test's fakes instead of reusing a stale cached copy.
+    for attr in (
+        "nvtx",
+        "engine_core",
+        "model_runner",
+        "scheduler",
+        "linear",
+        "modular_moe",
+        "moe",
+    ):
+        monkeypatch.delattr(module, attr, raising=False)
+    monkeypatch.setattr(module, "_installed", False)
+    return module
+
+
+@pytest.fixture
+def installed(
+    profiling_pkg,
+    nvtx_stub: dict[str, list],
+    monkeypatch: pytest.MonkeyPatch,
+    fake_vllm: SimpleNamespace,
+):
+    """Run install() with the gate on and return the faked targets."""
+    monkeypatch.setenv("VLLM_PPU_NVTX_PROFILE", "1")
+    registry_before = len(PATCH_REGISTRY)
+    profiling_pkg.install()
+    return SimpleNamespace(
+        pkg=profiling_pkg,
+        fakes=fake_vllm,
+        nvtx_calls=nvtx_stub,
+        registry_before=registry_before,
+    )
+
+
+def _records_for(targets) -> dict[str, Any]:
+    return {r.target: r for r in PATCH_REGISTRY if r.target in targets}
+
+
+# ---------------------------------------------------------------------------
+# The gate
+# ---------------------------------------------------------------------------
+
+
+def test_gate_off_installs_nothing(
+    profiling_pkg, fake_vllm: SimpleNamespace, cleared_gate: None
+) -> None:
+    records_before = _records_for(PROFILING_TARGETS)
+    profiling_pkg.install()
+
+    assert profiling_pkg._installed is False
+    for name in PROFILING_SUBMODULES:
+        assert name not in sys.modules
+    for original in fake_vllm.originals.values():
+        assert getattr(original, PATCH_MARKER, None) is None
+    assert _records_for(PROFILING_TARGETS) == records_before
+
+
+def test_gate_on_installs_every_patch(installed) -> None:
+    assert installed.pkg._installed is True
+
+    records = _records_for(PROFILING_TARGETS)
+    assert set(records) == set(PROFILING_TARGETS)
+    assert len(PATCH_REGISTRY) == installed.registry_before + len(PROFILING_TARGETS)
+
+    fakes = installed.fakes
+    replacements = {
+        "GPUModelRunner.__init__": fakes.GPUModelRunner.__init__,
+        "GPUModelRunner._prepare_inputs": fakes.GPUModelRunner._prepare_inputs,
+        "GPUModelRunner._sample": fakes.GPUModelRunner._sample,
+        "GPUModelRunner._model_forward": fakes.GPUModelRunner._model_forward,
+        "GPUModelRunner.execute_model": fakes.GPUModelRunner.execute_model,
+        "EngineCore.__init__": fakes.EngineCore.__init__,
+        "EngineCore.step": fakes.EngineCore.step,
+        "EngineCore.step_with_batch_queue": fakes.EngineCore.step_with_batch_queue,
+        "Scheduler.schedule": fakes.Scheduler.schedule,
+        "Scheduler._update_after_schedule": fakes.Scheduler._update_after_schedule,
+    }
+    for key, replacement in replacements.items():
+        assert getattr(replacement, PATCH_MARKER, None) is not None, key
+        assert replacement is not fakes.originals[key], key
+        target = records[[t for t in records if t.endswith(key)][0]].target
+        assert original_of(replacement, target) is fakes.originals[key], key
+
+
+def test_install_is_idempotent(installed) -> None:
+    count = len(PATCH_REGISTRY)
+    installed.pkg.install()
+    installed.pkg.install()
+    assert len(PATCH_REGISTRY) == count
+
+
+@pytest.mark.parametrize("gate_var", GATE_VARS)
+def test_gate_aliases_enable_profiling(
+    profiling_pkg,
+    nvtx_stub,
+    monkeypatch: pytest.MonkeyPatch,
+    cleared_gate: None,
+    gate_var: str,
+) -> None:
+    monkeypatch.setenv(gate_var, "1")
+    profiling_pkg.install()
+    assert profiling_pkg._installed is True
+
+
+@pytest.mark.parametrize("value", ["0", ""])
+def test_sail_false_prevents_install_with_truthy_legacy_aliases(
+    profiling_pkg,
+    nvtx_stub,
+    monkeypatch: pytest.MonkeyPatch,
+    cleared_gate: None,
+    value: str,
+) -> None:
+    monkeypatch.setenv("VLLM_SAIL_NVTX_PROFILE", value)
+    monkeypatch.setenv("VLLM_PPU_NVTX_PROFILE", "1")
+    monkeypatch.setenv("SAIL_NVTX_PROFILE", "1")
+    profiling_pkg.install()
+    assert profiling_pkg._installed is False
+
+
+@skip_with_prof_deps
+def test_missing_nvtx_package_disables_with_warning(
+    profiling_pkg,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("VLLM_PPU_NVTX_PROFILE", "1")
+    monkeypatch.delitem(sys.modules, "nvtx", raising=False)
+    with caplog.at_level(logging.WARNING):
+        profiling_pkg.install()
+    assert profiling_pkg._installed is False
+    assert any("nvtx" in message for message in caplog.messages)
+
+
+def test_missing_model_prof_still_installs(
+    profiling_pkg,
+    nvtx_stub,
+    monkeypatch: pytest.MonkeyPatch,
+    cleared_gate: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("VLLM_PPU_NVTX_PROFILE", "1")
+    with caplog.at_level(logging.INFO):
+        profiling_pkg.install()
+    # model_prof is absent from this environment by construction.
+    assert profiling_pkg._installed is True
+    assert any("model_prof" in record.getMessage() for record in caplog.records)
+
+
+def test_drifted_target_degrades_to_warning(
+    profiling_pkg,
+    nvtx_stub,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("VLLM_PPU_NVTX_PROFILE", "1")
+    monkeypatch.delitem(sys.modules, "vllm.v1.worker.gpu_model_runner")
+    with caplog.at_level(logging.WARNING):
+        profiling_pkg.install()
+    assert profiling_pkg._installed is False
+    assert any("could not be" in message for message in caplog.messages)
+
+
+# ---------------------------------------------------------------------------
+# Wrapper behaviour against the faked targets
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def recording_nvtx(installed, monkeypatch: pytest.MonkeyPatch):
+    """Swap the helper backends for recorders after install imported them."""
+    prof_nvtx = importlib.import_module("vllm_sail.profiling.nvtx")
+    pushes: list[str] = []
+    pops: list[int] = []
+    iters: list[int] = []
+    monkeypatch.setattr(
+        prof_nvtx, "_torch_range_push", lambda label: pushes.append(label)
+    )
+    monkeypatch.setattr(prof_nvtx, "_torch_range_pop", lambda: pops.append(1))
+    monkeypatch.setattr(prof_nvtx, "_model_prof_iter", lambda it: iters.append(it))
+    return SimpleNamespace(pushes=pushes, pops=pops, iters=iters)
+
+
+def test_execute_model_wraps_iteration_range(installed, recording_nvtx) -> None:
+    runner = installed.fakes.GPUModelRunner()
+    assert runner.iteration == 0
+
+    output = _sched_output()
+    result = runner.execute_model(output)
+
+    assert result == ("execute_model", output, None)
+    assert recording_nvtx.pushes == ["[prof_range]: iter 0"]
+    assert len(recording_nvtx.pops) == 1
+    assert recording_nvtx.iters == [0]
+    assert runner.iteration == 1
+    assert "total_tokens=5,req_id:num_tokens={'r1': 5}" in installed.nvtx_calls["marks"]
+
+    runner.execute_model(output)
+    assert recording_nvtx.pushes[1] == "[prof_range]: iter 1"
+
+
+def test_sample_wraps_sampler_range(installed, recording_nvtx) -> None:
+    runner = installed.fakes.GPUModelRunner()
+    logits = SimpleNamespace(shape=(4, 8))
+
+    result = runner._sample(logits, None)
+
+    assert result == ("sample", logits, None)
+    assert recording_nvtx.pushes == ["[FW_NATIVE] op:sampler,logits:(4, 8)"]
+    assert len(recording_nvtx.pops) == 1
+
+    runner._sample(None, "spec")
+    assert recording_nvtx.pushes[1] == "[FW_NATIVE] op:sampler,logits:None"
+
+
+def test_model_forward_range_uses_stashed_scheduler_output(
+    installed, recording_nvtx
+) -> None:
+    runner = installed.fakes.GPUModelRunner()
+
+    assert runner._model_forward(input_ids=1) == ("forward", (), {"input_ids": 1})
+    assert recording_nvtx.pushes == []
+
+    runner._ppu_nvtx_prof_scheduler_output = _sched_output(
+        num_scheduled_tokens={"r1": 3, "r2": 1},
+        scheduled_spec_decode_tokens={"r1": [10]},
+    )
+    runner._model_forward(input_ids=2)
+    assert recording_nvtx.pushes == ["total bs=2, P bs=1"]
+    assert len(recording_nvtx.pops) == 1
+
+    # execute_model clears the stash, so later forwards are uninstrumented.
+    runner.execute_model(_sched_output())
+    assert recording_nvtx.pushes[-1] == "[prof_range]: iter 0"
+    count = len(recording_nvtx.pushes)
+    runner._model_forward(input_ids=3)
+    assert len(recording_nvtx.pushes) == count
+
+
+def test_prepare_inputs_is_annotated(installed) -> None:
+    runner = installed.fakes.GPUModelRunner()
+    assert runner._prepare_inputs("so", "nst") == ("prepare_inputs", "so", "nst")
+    assert "prepare_inputs" in installed.nvtx_calls["annotated"]
+
+
+def test_engine_core_steps_carry_iteration_ranges(installed, recording_nvtx) -> None:
+    core = installed.fakes.EngineCore("arg")
+    assert core.iteration == 0
+    assert core.init_args == (("arg",), {})
+
+    assert core.step() == ("step",)
+    assert core.step_with_batch_queue() == ("step_with_batch_queue",)
+
+    assert recording_nvtx.pushes == [
+        "[prof_range]: iter 0",
+        "[prof_range]: iter 1",
+    ]
+    assert len(recording_nvtx.pops) == 2
+    assert recording_nvtx.iters == [0, 1]
+    assert core.iteration == 2
+
+
+def test_scheduler_schedule_is_annotated_and_update_marks(installed) -> None:
+    scheduler = installed.fakes.Scheduler()
+
+    assert scheduler.schedule(True) == ("schedule", True)
+    assert "schedule" in installed.nvtx_calls["annotated"]
+
+    output = _sched_output(
+        scheduled_new_reqs=[SimpleNamespace(req_id="r1")],
+        finished_req_ids={"r9"},
+    )
+    scheduler._update_after_schedule(output)
+    assert scheduler.last_update is output
+    marks = installed.nvtx_calls["marks"]
+    assert "new_reqs: ['r1']" in marks
+    assert "finish_req: {'r9'}" in marks
+    assert any(m.startswith("total_tokens=5") for m in marks)
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers without the optional dependencies
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def bare_nvtx_helpers(fake_vllm: SimpleNamespace, monkeypatch: pytest.MonkeyPatch):
+    """Import profiling/nvtx.py fresh with nvtx/model_prof genuinely absent."""
+    monkeypatch.delitem(sys.modules, "nvtx", raising=False)
+    monkeypatch.delitem(sys.modules, "model_prof", raising=False)
+    monkeypatch.delitem(sys.modules, "vllm_sail.profiling.nvtx", raising=False)
+    module = importlib.import_module("vllm_sail.profiling.nvtx")
+    yield module
+    monkeypatch.delitem(sys.modules, "vllm_sail.profiling.nvtx", raising=False)
+
+
+@skip_with_prof_deps
+def test_helpers_import_cleanly_without_optional_deps(bare_nvtx_helpers) -> None:
+    assert bare_nvtx_helpers.has_nvtx is False
+    assert bare_nvtx_helpers.has_model_prof is False
+
+    bare_nvtx_helpers.mark("ignored")
+    bare_nvtx_helpers.range_push("ignored")
+    bare_nvtx_helpers.range_pop()
+    bare_nvtx_helpers.prof_iter(3)
+    bare_nvtx_helpers.sche_mark(_sched_output())
+
+
+def test_annotate_fallback_is_identity(bare_nvtx_helpers) -> None:
+    @bare_nvtx_helpers.annotate("whatever")
+    def documented(x: int) -> int:
+        """Keeps its name."""
+        return x + 1
+
+    assert documented(1) == 2
+    assert documented.__name__ == "documented"
+    assert documented.__wrapped__ is not None
+
+
+def test_range_push_swallows_cpu_torch_errors(bare_nvtx_helpers) -> None:
+    # torch is installed in the test venv but has no CUDA NVTX support, so the
+    # real torch.cuda.nvtx.range_push raises; a profiler must not propagate it.
+    if not bare_nvtx_helpers.has_torch_nvtx:
+        pytest.skip("torch.cuda.nvtx not importable here")
+    bare_nvtx_helpers.range_push("probe")
+    bare_nvtx_helpers.range_pop()
+
+
+def test_sche_mark_format_with_nvtx(
+    fake_vllm: SimpleNamespace,
+    nvtx_stub: dict[str, list],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delitem(sys.modules, "vllm_sail.profiling.nvtx", raising=False)
+    prof_nvtx = importlib.import_module("vllm_sail.profiling.nvtx")
+    output = _sched_output(
+        scheduled_new_reqs=[SimpleNamespace(req_id="a"), SimpleNamespace(req_id="b")],
+        finished_req_ids={"z"},
+    )
+    prof_nvtx.sche_mark(output)
+    assert nvtx_stub["marks"] == [
+        "new_reqs: ['a', 'b']",
+        "total_tokens=5,req_id:num_tokens={'r1': 5}",
+        "finish_req: {'z'}",
+    ]

@@ -1,0 +1,27 @@
+name: Feature request
+description: Propose a capability or improvement for vLLM SAIL.
+title: "[Feature]: "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: Describe the workload and what is currently missing.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the desired interface or outcome, including relevant device, model or SDK requirements.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation approach
+      description: Describe how correctness or improvement could be demonstrated and whether you can help test it.

@@ -1,0 +1,15 @@
+cmake>=3.26.1
+ninja
+packaging>=24.2
+setuptools>=77.0.3,<81.0.0
+setuptools-scm>=8
+wheel
+# setup.py reads csrc/upstream/manifest.toml; tomllib is stdlib from 3.11.
+tomli; python_version < "3.11"
+# The compiled extensions (setup.py) additionally need, in the build env:
+#   - a torch build for the PPU (provides torch.utils.cpp_extension)
+#   - the PPU SDK toolchain: hgcc, via PPU_SDK/bin/hgcc, HGCC, or PATH
+#   - network access for the pinned cmake-hgcc fallback, or an existing checkout
+#     via CMAKE_HGCC_DIR / installation via CMAKE_PREFIX_PATH
+# Native extensions are the default, so missing prerequisites fail the build.
+# Set VLLM_SAIL_SKIP_EXT=1 only for an intentional pure-Python wheel.

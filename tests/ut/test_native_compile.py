@@ -1,0 +1,462 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Compile regressions using host tools, without torch, vLLM, or a PPU SDK.
+
+These exercise CMake's option handling and the sampler's scalar load block.
+They do not compile device code or establish PPU numerical correctness.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).parents[2]
+
+
+def _tool(name: str) -> str:
+    found = shutil.which(name)
+    if found is None:
+        pytest.skip(f"optional host compile regression requires {name}")
+    return found
+
+
+def _run(argv: list[str], *, env: dict[str, str] | None = None) -> None:
+    result = subprocess.run(argv, env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    ("environment", "settings", "expected"),
+    [
+        ({}, "", "ppu_15;ppu_10"),
+        ({"PYTORCH_SAIL_ARCH": "ppu_15;ppu_10"}, "", "ppu_15;ppu_10"),
+        pytest.param(
+            {"VLLM_PPU_HG_ARCH": "ppu_10"},
+            "",
+            "ppu_15;ppu_10",
+            id="old-ppu-build-variable-is-ignored",
+        ),
+        ({"VLLM_SAIL_HG_ARCH": "ppu_10"}, "", "ppu_10"),
+        (
+            {"VLLM_SAIL_HG_ARCH": " ppu_15;ppu_15 "},
+            "",
+            "ppu_15",
+        ),
+        (
+            {"VLLM_SAIL_HG_ARCH": ""},
+            "",
+            "ppu_15;ppu_10",
+        ),
+        (
+            {"VLLM_SAIL_HG_ARCH": " ; \t "},
+            "",
+            "ppu_15;ppu_10",
+        ),
+        (
+            {
+                "PYTORCH_SAIL_ARCH": "ppu_10",
+                "VLLM_SAIL_HG_ARCH": "",
+            },
+            "",
+            "ppu_10",
+        ),
+        ({}, 'set(CMAKE_HG_ARCHITECTURES "ppu_10;ppu_15")', "ppu_10;ppu_15"),
+        (
+            {"VLLM_SAIL_HG_ARCH": "ppu_10"},
+            'set(CMAKE_HG_ARCHITECTURES "ppu_10;ppu_15")',
+            "ppu_10;ppu_15",
+        ),
+    ],
+)
+def test_cmake_selects_architectures_before_enabling_hg(
+    tmp_path, environment, settings, expected
+):
+    cmake = _tool("cmake")
+    # Pass real environment values: CMake's set(ENV{...} "") unsets a variable
+    # instead of representing an explicitly empty value inherited from a shell.
+    env = os.environ.copy()
+    for name in ("PYTORCH_SAIL_ARCH", "VLLM_SAIL_HG_ARCH", "VLLM_PPU_HG_ARCH"):
+        env.pop(name, None)
+    env.update(environment)
+    source = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+    start = source.index("set(CMAKE_HG_ENABLE_CU_EXTENSION ON)")
+    end = source.index("project(vllm_sail_native", start)
+    script = tmp_path / "architectures.cmake"
+    script.write_text(
+        settings
+        + "\n"
+        + source[start:end]
+        + f'\nif(NOT "${{CMAKE_HG_ARCHITECTURES}}" STREQUAL "{expected}" '
+        + f'OR NOT "${{PYTORCH_SAIL_ARCH}}" STREQUAL "{expected}")\n'
+        + 'message(FATAL_ERROR "HG and Torch architectures must match the request")\n'
+        + "endif()\n",
+        encoding="utf-8",
+    )
+    _run([cmake, "-P", str(script)], env=env)
+
+
+def test_grouped_topk_finite_check_disambiguates_sdk_scalars(tmp_path: Path) -> None:
+    compiler = _tool("c++")
+    source = (
+        ROOT / "csrc/upstream/libtorch_stable/moe/grouped_topk_kernels.cu"
+    ).read_text(encoding="utf-8")
+    start = source.index("template <typename T_OUT, typename T_IN>")
+    end = source.index("// Scoring function enums", start)
+    # SDK half types convert to both float and double; the math library has
+    # overloads for both. Compile the actual generated helper and test NaN/Inf.
+    prelude = r"""
+#include <cassert>
+#include <cmath>
+#include <limits>
+#define __device__
+#define __COMPATIBLECC_VER_MAJOR__ 13
+#define __COMPATIBLECC_VER_MINOR__ 0
+namespace hggc { namespace std = ::std; }
+using std::isfinite;
+struct Half {
+  float value;
+  operator float() const { return value; }
+  operator double() const { return value; }
+};
+struct __ppu_bfloat16 : Half {};
+float __bfloat162float(__ppu_bfloat16 value) { return value.value; }
+"""
+    checks = r"""
+int main() {
+  for (float x : {0.0f, -1.0f, 65504.0f, INFINITY, -INFINITY, NAN}) {
+    assert(is_finite(x) == std::isfinite(x));
+    assert(is_finite(Half{x}) == std::isfinite(x));
+    assert(is_finite(__ppu_bfloat16{{x}}) == std::isfinite(x));
+  }
+}
+"""
+    unit = tmp_path / "finite.cpp"
+    unit.write_text(
+        "#include <initializer_list>\n" + prelude + source[start:end] + checks,
+        encoding="utf-8",
+    )
+    executable = tmp_path / "finite"
+    _run([compiler, "-std=c++20", str(unit), "-o", str(executable)])
+    _run([str(executable)])
+
+
+@pytest.mark.parametrize("arch", [800, 890])
+@pytest.mark.parametrize(
+    "model", ["minimax_m3_qknorm_rope_kv_insert", "kimi_k3_mla_key_concat_kv_cache"]
+)
+def test_model_fused_kernels_use_ordinary_hg_launches(tmp_path, arch, model):
+    """Preprocess actual generated sources for both PPU compatibility targets."""
+    compiler = _tool("c++")
+    source = (
+        ROOT / f"csrc/upstream/libtorch_stable/fused_{model}_kernel.cu"
+    ).read_text()
+    # The preprocessor needs no SDK definitions to evaluate the launch guards.
+    source = re.sub(r"^\s*#\s*include[^\n]*", "", source, flags=re.MULTILINE)
+    unit = tmp_path / "launch.cpp"
+    unit.write_text(source)
+    result = subprocess.run(
+        [
+            compiler,
+            "-E",
+            "-P",
+            "-x",
+            "c++",
+            "-D__HGGCCC__=1",
+            f"-DCOMPATIBLE_ARCH={arch}",
+            str(unit),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "<<<grid, kBlockSize, 0, stream>>>" in result.stdout
+    assert "hggcLaunchKernelEx(" not in result.stdout
+    assert "hggcGridDependencySynchronize(" not in result.stdout
+    assert "hggcTriggerProgrammaticLaunchCompletion(" not in result.stdout
+
+
+def test_mamba_scan_composition_and_prefix_carry(tmp_path):
+    """Compile the real scan functors against a worked recurrence example."""
+    compiler = _tool("c++")
+    source = (ROOT / "csrc/upstream/libtorch_stable/mamba/selective_scan.h").read_text()
+    start = source.index("template<typename scalar_t> struct SSMScanOp;")
+    end = source.index("template<typename Ktraits>", start)
+    unit = tmp_path / "scan.cpp"
+    unit.write_text(
+        "#include <cassert>\n#include <type_traits>\n"
+        "#define __device__ constexpr\n#define __forceinline__ inline\n"
+        "struct float2 { float x, y; }; struct float4 { float x, y, z, w; };\n"
+        "constexpr float2 make_float2(float x, float y) { return {x, y}; }\n"
+        + source[start:end]
+        + """
+constexpr bool check_scan() {
+  SSMScanOp<float> op;
+  auto ab = op(op({2, 3}, {5, 7}), {11, 13});
+  if (ab.x != 110 || ab.y != 255) return false;
+  SSMScanPrefixCallbackOp<float> callback({1, 17});
+  auto old = callback(ab);
+  if (old.x != 1 || old.y != 17) return false;
+  if (callback.running_prefix.y != 2125) return false;
+  old = callback({0.5f, -1});
+  return old.y == 2125 && callback.running_prefix.y == 1061.5f;
+}
+static_assert(check_scan());
+"""
+    )
+    _run([compiler, "-std=c++17", "-fsyntax-only", str(unit)])
+
+
+@pytest.mark.parametrize("arch", [800, 890])
+def test_fused_quant_and_qk_helpers_compile_without_ptx(tmp_path, arch):
+    """Type-check generated HG helper branches; numerical tests need a PPU."""
+    compiler = _tool("c++")
+    root = ROOT / "csrc/upstream/libtorch_stable"
+    quant = (root / "quantization/fused_kernels/quant_conversions.cuh").read_text()
+    start = quant.index("static __device__ __forceinline__ int8_t float_to_int8_rn")
+    end = quant.index("template <typename fp8_type>", start)
+    copies = (root / "async_util.cuh").read_text()
+    unit = tmp_path / "fused_helpers.cpp"
+    unit.write_text(
+        "#include <cstdint>\n#include <cmath>\nusing std::isnan;\n"
+        "#define __device__\n#define __forceinline__ inline\n"
+        "struct alignas(16) int4 { int x, y, z, w; };\n"
+        "void __syncwarp() {}\n"
+        + quant[start:end]
+        + copies
+        + """
+int8_t compile_helpers(float input) {
+  using namespace vllm::cuda_async;
+  alignas(16) uint32_t src[] = {10, 20, 30, 40}, dst[] = {0, 0, 0, 0};
+  cp_async_shared_global_ca(dst, src, 4);
+  cp_async_shared_global_ca(dst, src, 8);
+  cp_async_shared_global_ca(dst, src, 16);
+  cp_async_shared_global_16_cg(dst, src);
+  cp_async_commit_group();
+  cp_async_wait_group<1>(); cp_async_wait_group<0>();
+  return float_to_int8_rn(input);
+}
+"""
+    )
+    defines = ["-D__HGGCCC__=1", f"-DCOMPATIBLE_ARCH={arch}"]
+    preprocessed = subprocess.run(
+        [compiler, "-E", "-P", *defines, str(unit)], capture_output=True, text=True
+    )
+    assert preprocessed.returncode == 0, preprocessed.stderr
+    assert "cvt.rni.sat.s8.f32" not in preprocessed.stdout
+    assert '"cp.async.' not in preprocessed.stdout
+    _run([compiler, "-std=c++17", "-fsyntax-only", *defines, str(unit)])
+
+
+@pytest.mark.parametrize("torch_force_include", [False, True])
+@pytest.mark.parametrize("hg_standard", [17, 20])
+def test_extension_options_survive_torch_config(
+    tmp_path: Path, torch_force_include: bool, hg_standard: int
+) -> None:
+    cmake = _tool("cmake")
+    compiler = _tool("c++")
+    compat = tmp_path / "torch compat"
+    compat.mkdir()
+    (compat / "compatible_wrapper.h").write_text(
+        "#pragma once\n#define COMPATIBLE_VERSION 12000\n", encoding="utf-8"
+    )
+    # Model the SDK namespace contract. Compile
+    # our real compatibility header, with no SDK or torch dependency in the gate.
+    csrc = tmp_path / "csrc"
+    (csrc / "cub").mkdir(parents=True)
+    (csrc / "cub/util_namespace.cuh").write_text(
+        "#pragma once\n"
+        "#ifdef CUB_WRAPPED_NAMESPACE\n"
+        "namespace CUB_WRAPPED_NAMESPACE { namespace cub { struct Scan {}; } }\n"
+        "#define CUB_NS_QUALIFIER ::CUB_WRAPPED_NAMESPACE::cub\n"
+        "#else\nnamespace cub { struct Scan {}; }\n#endif\n",
+        encoding="utf-8",
+    )
+    kernel_compat = ROOT / "csrc/ppu_kernel_compat.h"
+    if kernel_compat.exists():
+        shutil.copyfile(kernel_compat, csrc / kernel_compat.name)
+    # Plugin headers must win over same-named upstream headers.
+    for folder in ("plugin", "upstream"):
+        (csrc / folder).mkdir()
+        (csrc / folder / "owned_header.h").write_text(
+            "#define PLUGIN_HEADER 1\n"
+            if folder == "plugin"
+            else '#error "upstream header shadows the plugin header"\n'
+        )
+    (tmp_path / "binding.cpp").write_text(
+        "static_assert(COMPATIBLE_VERSION == 12000);\n"
+        "static_assert(__cplusplus == 202002L);\n"
+        "#ifdef CUB_NS_QUALIFIER\n#error HG headers leaked into CXX\n#endif\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "kernel.hg").write_text(
+        '#include "owned_header.h"\n'
+        "static_assert(PLUGIN_HEADER == 1);\n"
+        "#include <cub/util_namespace.cuh>\n"
+        "using Scan = cub::Scan;\n"
+        "#ifndef ENABLE_FP8\n#error FP8 conversions are disabled\n#endif\n"
+        "#if defined(__HGGC_NO_HALF_OPERATORS__) || defined(__HGGC_NO_HALF_CONVERSIONS__)"
+        " || defined(__HGGC_NO_HALF2_OPERATORS__)"
+        " || defined(__HGGC_NO_BFLOAT16_CONVERSIONS__)\n"
+        "#error Upstream kernels require SDK scalar operators and conversions\n#endif\n"
+        "static_assert(COMPATIBLE_VERSION == 12000);\n"
+        f"static_assert(__cplusplus == {201703 if hg_standard == 17 else 202002}L);\n",
+        encoding="utf-8",
+    )
+    # A minimal HG language shim routes *host-only* test sources through c++.
+    # CMake still evaluates COMPILE_LANGUAGE:HG and orders flags itself; this
+    # deliberately tests no cmake-hgcc or SDK implementation details.
+    modules = tmp_path / "modules"
+    modules.mkdir()
+    compiler_config = f"""set(CMAKE_HG_COMPILER "{compiler}")
+set(CMAKE_HG_COMPILER_ENV_VAR HGCC)
+set(CMAKE_HG_COMPILER_LOADED TRUE)
+set(CMAKE_HG_SOURCE_FILE_EXTENSIONS hg)
+set(CMAKE_HG_OUTPUT_EXTENSION .o)
+"""
+    (modules / "CMakeDetermineHGCompiler.cmake").write_text(
+        compiler_config
+        + 'file(WRITE "${CMAKE_PLATFORM_INFO_DIR}/CMakeHGCompiler.cmake" [=['
+        + compiler_config
+        + "]=])\n",
+        encoding="utf-8",
+    )
+    (modules / "CMakeTestHGCompiler.cmake").write_text(
+        "set(CMAKE_HG_COMPILER_WORKS TRUE)\n", encoding="utf-8"
+    )
+    (modules / "CMakeHGInformation.cmake").write_text(
+        """set(CMAKE_HG_COMPILE_OBJECT
+  "<CMAKE_HG_COMPILER> <DEFINES> <INCLUDES> <FLAGS> -x c++ -c <SOURCE> -o <OBJECT>")
+set(CMAKE_INCLUDE_FLAG_HG "-I")
+set(CMAKE_HG_INFORMATION_LOADED TRUE)
+""",
+        encoding="utf-8",
+    )
+    # Execute the production target function, with only the external Python,
+    # torch and HGGC package discovery replaced. The real CMake generator and
+    # compiler must preserve both -include/operand pairs from the failing log.
+    source = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+    function = re.search(
+        r"^function\(ppu_add_extension target\).*?^endfunction\(\)",
+        source,
+        re.MULTILINE | re.DOTALL,
+    )
+    assert function is not None
+    torch_options = (
+        "target_compile_options(torch INTERFACE -include "
+        '"${PPU_COMPAT_DIR}/compatible_wrapper.h")\n'
+        "target_compile_definitions(torch INTERFACE CUB_WRAPPED_NAMESPACE=at_cuda_detail)"
+        if torch_force_include
+        else ""
+    )
+    (tmp_path / "CMakeLists.txt").write_text(
+        f"""cmake_minimum_required(VERSION 3.26)
+list(APPEND CMAKE_MODULE_PATH "{modules.as_posix()}")
+project(ppu_option_regression LANGUAGES CXX HG)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_HG_ARCHITECTURES "ppu_15;ppu_10")
+set(CMAKE_HG_STANDARD {hg_standard})
+# cmake-hgcc selects the requested standard before TorchConfig appends flags.
+# Reproduce the log's later -std=c++17 overriding the requested C++20.
+set(CMAKE_HG_FLAGS "-std=c++${{CMAKE_HG_STANDARD}} -std=c++17 -D__HGGC_NO_HALF_OPERATORS__ -D__HGGC_NO_HALF_CONVERSIONS__ -D__HGGC_NO_HALF2_OPERATORS__ -D__HGGC_NO_BFLOAT16_CONVERSIONS__")
+set(PPU_COMPAT_DIR "{compat.as_posix()}")
+set(PPU_EXT_OUTPUT_DIR "${{CMAKE_BINARY_DIR}}/extensions")
+add_library(torch INTERFACE)
+add_library(HGGC::toolkit INTERFACE IMPORTED)
+{torch_options}
+function(Python_add_library target kind soabi)
+  add_library(${{target}} ${{kind}} ${{ARGN}})
+endfunction()
+{function.group()}
+ppu_add_extension(_C INCLUDE_ROOT csrc/plugin SOURCES binding.cpp kernel.hg)
+ppu_add_extension(_moe_C INCLUDE_ROOT csrc/plugin SOURCES binding.cpp kernel.hg)
+foreach(target _C _moe_C)
+  get_target_property(archs ${{target}} HG_ARCHITECTURES)
+  if(NOT "${{archs}}" STREQUAL "ppu_15;ppu_10")
+    message(FATAL_ERROR "The extension lost part of the architecture list")
+  endif()
+endforeach()
+""",
+        encoding="utf-8",
+    )
+    build = tmp_path / "build"
+    _run(
+        [
+            cmake,
+            "-S",
+            str(tmp_path),
+            "-B",
+            str(build),
+            f"-DCMAKE_CXX_COMPILER={compiler}",
+        ]
+    )
+    _run([cmake, "--build", str(build)])
+
+
+def test_bf16_register_loads_do_not_require_conversion_operators(
+    tmp_path: Path,
+) -> None:
+    compiler = _tool("c++")
+    source = (ROOT / "csrc/plugin/sampler_bf16.h").read_text(encoding="utf-8")
+    start = source.index("  // Load scores into registers (bf16 -> float).")
+    end = source.index("  // Accumulate histogram.", start)
+    # Minimise to the exact failing block. Model the SDK's conversion-disabled
+    # BF16 interface, and check both template branches including partial rows.
+    # This is a host-side contract test, not an emulation of the device kernel.
+    prelude = r"""
+#include <bit>
+#include <cassert>
+#include <cstdint>
+#include <vector>
+struct BFloat16 { uint16_t bits; };  // deliberately no operator float()
+float __bfloat162float(BFloat16 value) {
+  return std::bit_cast<float>(uint32_t(value.bits) << 16);
+}
+constexpr int kBF16VecsPerThread = 4;
+constexpr int kBF16BlockSize = 1024;
+constexpr int kBF16Max1PassLen = 16384;
+struct BF16Vec4F {
+  float data[4];
+  float& operator[](int i) { return data[i]; }
+};
+struct Smem { float scoreBuffer[kBF16Max1PassLen] = {}; };
+void __syncthreads() {}
+template <bool kIs2Pass>
+void load(const BFloat16* scores, uint32_t tx, uint32_t length, Smem* smem) {
+"""
+    checks = r"""
+  for (int v = 0; v < kBF16VecsPerThread; ++v) {
+    uint32_t base = (tx + v * kBF16BlockSize) * 4;
+    if (base >= length) break;
+    for (int e = 0; e < 4; ++e) {
+      uint32_t idx = base + e;
+      float expected = (idx < length) ? __bfloat162float(scores[idx]) : 0.0f;
+      assert(local[v][e] == expected);
+    }
+  }
+}
+int main() {
+  for (uint32_t length : {1u, 4097u, 16384u, 16385u, 32768u}) {
+    std::vector<BFloat16> scores(length);
+    constexpr uint16_t values[] = {0, 0x3f80, 0xbf80, 0x3fc0, 0x7f80, 0xff80};
+    for (uint32_t i = 0; i < length; ++i) scores[i].bits = values[i % 6];
+    Smem smem;
+    for (uint32_t tx = 0; tx < kBF16BlockSize; ++tx) {
+      if (length > kBF16Max1PassLen) load<true>(scores.data(), tx, length, &smem);
+      else load<false>(scores.data(), tx, length, &smem);
+    }
+    for (uint32_t i = kBF16Max1PassLen; i < length; ++i) {
+      assert(smem.scoreBuffer[i - kBF16Max1PassLen] == __bfloat162float(scores[i]));
+    }
+  }
+}
+"""
+    unit = tmp_path / "bf16_load.cpp"
+    unit.write_text(prelude + source[start:end] + checks, encoding="utf-8")
+    executable = tmp_path / "bf16_load"
+    _run([compiler, "-std=c++20", str(unit), "-o", str(executable)])
+    _run([str(executable)])

@@ -1,0 +1,68 @@
+name: Unit tests
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  cpu-unit-tests:
+    name: CPU UT (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install CPU-only test tooling
+        run: python -m pip install -r requirements/dev.txt
+      - name: Run unit tests without vLLM, torch, or hardware
+        run: >-
+          python -m pytest tests/ut -q
+          --cov=vllm_sail --cov-branch --cov-report=term-missing
+          --cov-report=xml
+      - name: Upload coverage
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage.xml
+          flags: python-${{ matrix.python-version }}
+          fail_ci_if_error: false
+
+  vllm-pin-compatibility:
+    name: vLLM pin (${{ matrix.pin-file }})
+    runs-on: ubuntu-latest
+    # A real vLLM install can be unavailable or unsupported on a public CPU
+    # runner. Keep this compatibility signal visible without blocking CPU UT.
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        pin-file:
+          - vllm-release-tag.commit
+          - vllm-main-verified.commit
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install test tooling
+        run: python -m pip install -r requirements/dev.txt
+      - name: Install the selected vLLM pin
+        env:
+          PIN_FILE: ${{ matrix.pin-file }}
+        run: |
+          pin="$(tr -d '[:space:]' < ".github/${PIN_FILE}")"
+          if [[ "${PIN_FILE}" == "vllm-release-tag.commit" ]]; then
+            python -m pip install "vllm==${pin#v}"
+          else
+            python -m pip install "vllm @ git+https://github.com/vllm-project/vllm.git@${pin}"
+          fi
+      - name: Run unit tests beside vLLM
+        run: python -m pytest tests/ut -q

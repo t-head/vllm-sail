@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+
+schema = 2
+
+[[extension]]
+name = "_C"
+device_sources = ["csrc/plugin/sampler_bf16.hg"]
+bindings = ["csrc/plugin/ppu_bindings.cpp"]
+
+[[extension]]
+name = "_moe_C"
+device_sources = ["csrc/plugin/libtorch_stable/moe/ep_scatter_kernels.hg"]
+bindings = ["csrc/plugin/libtorch_stable/moe/ppu_moe_bindings.cpp"]

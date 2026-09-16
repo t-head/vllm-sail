@@ -1,0 +1,106 @@
+# SPDX-License-Identifier: Apache-2.0
+[build-system]
+requires = [
+    "cmake>=3.26.1",
+    "ninja",
+    "packaging>=24.2",
+    "setuptools>=77.0.3,<81.0.0",
+    "setuptools-scm>=8",
+    "wheel",
+    # setup.py reads csrc/upstream/manifest.toml to derive the compiled sources.
+    "tomli; python_version < '3.11'",
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vllm-sail"
+description = "vLLM SAIL: inference on T-Head PPU accelerators"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+keywords = ["vllm", "sail", "ppu", "hggc", "inference", "llm"]
+requires-python = ">=3.10,<3.14"
+dynamic = ["version", "dependencies", "optional-dependencies"]
+authors = [{ name = "PPU Inference Team" }]
+classifiers = [
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+# ---------------------------------------------------------------------------
+# vLLM plugin entry points.
+#
+# Two groups, one shared allowlist name. `vllm.platform_plugins` is resolved lazily the
+# first time `vllm.platforms.current_platform` is touched; `vllm.general_plugins`
+# is loaded in EVERY process (API server, engine core subprocess, each worker),
+# which is why the callable below must be idempotent. Using ``ppu`` in both
+# groups ensures ``VLLM_PLUGINS=ppu`` enables the complete plugin lifecycle.
+# See vllm/plugins/__init__.py and docs/developer_guide/architecture.md.
+# ---------------------------------------------------------------------------
+[project.entry-points."vllm.platform_plugins"]
+ppu = "vllm_sail:register"
+
+[project.entry-points."vllm.general_plugins"]
+ppu = "vllm_sail:register_out_of_tree"
+
+[project.urls]
+Homepage = "https://github.com/t-head/vllm-sail"
+Repository = "https://github.com/t-head/vllm-sail"
+
+[tool.setuptools_scm]
+write_to = "vllm_sail/_version.py"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["vllm_sail*"]
+
+[tool.setuptools.package-data]
+vllm_sail = [
+    "native/data/*.toml",
+    "model_executor/layers/fused_moe/configs/*.json",
+    "model_executor/layers/quantization/utils/configs/*.json",
+    "utils/deepgemm_configs/*.json",
+]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements/ppu.txt"] }
+optional-dependencies.profiling = { file = ["requirements/profiling.txt"] }
+optional-dependencies.dev = { file = ["requirements/dev.txt"] }
+
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+exclude = ["vllm_sail/_version.py", "csrc", "docs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "W"]
+ignore = [
+    "E501",   # line length is handled by the formatter
+    "B008",   # function call in default arg — common in torch code
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Patch modules deliberately copy upstream bodies verbatim, including their
+# import style and unused-in-context names, so that the upstream diff stays
+# mechanical. Do not "clean up" a patch body.
+"vllm_sail/patch/**" = ["F401", "F811", "E402"]
+"vllm_sail/patch/template/*.py" = ["F821", "F401"]
+
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+    "ppu: requires real PPU hardware (skipped when absent)",
+]
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.coverage.run]
+branch = true
+concurrency = ["thread", "multiprocessing"]
+include = ["*/vllm_sail/*"]
+omit = ["*/vllm_sail/_version.py", "*/vllm_sail/patch/template/*"]

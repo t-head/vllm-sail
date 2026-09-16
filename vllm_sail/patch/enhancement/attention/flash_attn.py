@@ -1,0 +1,70 @@
+# ruff: noqa: E731, W291, W293, UP037
+# ruff: noqa: F821
+# Copied bodies resolve globals in their upstream module through bind_body.
+# SPDX-License-Identifier: Apache-2.0
+"""Allow sinks and FP8 for the PPU FA3 implementation."""
+
+from __future__ import annotations
+
+from vllm.v1.attention.backends import flash_attn as _flash_attn
+
+from vllm_sail.patch.bodies import bind_body
+from vllm_sail.patch.utils import patch
+
+
+def supports_combination(
+    cls,
+    head_size: int,
+    dtype: torch.dtype,
+    kv_cache_dtype: CacheDType | None,
+    block_size: int | None,
+    use_mla: bool,
+    has_sink: bool,
+    use_sparse: bool,
+    use_mm_prefix: bool,
+    device_capability: DeviceCapability,
+) -> str | None:
+    if has_sink and device_capability < DeviceCapability(9, 0):
+        # PPU MODIFICATION: begin
+        # PPU FA3 takes s_aux (sinks) through flash_attn_3.fwd; FA2 does not.
+        fa_version = get_flash_attn_version(
+            head_size=head_size, head_size_v=head_size, has_sinks=has_sink
+        )
+        if not (current_platform.is_ppu() and fa_version == 3):
+            return "sink not supported on compute capability < 9.0"
+        # PPU MODIFICATION: end
+    if (
+        kv_cache_dtype is not None
+        and is_quantized_kv_cache(kv_cache_dtype)
+        and not flash_attn_supports_kv_cache_dtype(
+            kv_cache_dtype,
+            head_size=head_size,
+            head_size_v=head_size,
+            has_sinks=has_sink,
+        )
+    ):
+        # PPU MODIFICATION: begin
+        return (
+            "FP8 KV cache requires FA3 on SM90, FA3 on PPU sm_89, "
+            "or FA4 on SM100"
+        )
+        # PPU MODIFICATION: end
+    if (
+        use_mm_prefix
+        and get_flash_attn_version(head_size=head_size, has_sinks=has_sink) != 4
+    ):
+        return (
+            "mm_prefix (PrefixLM bidirectional attention) requires "
+            "FlashAttention v4, which does not resolve for this "
+            "head_size"
+        )
+    return None
+
+
+patch(
+    "vllm.v1.attention.backends.flash_attn",
+    "FlashAttentionBackend.supports_combination",
+    reason="The upstream sink combination gate assumes only NVIDIA SM90 supports FA3 sinks.",
+    affected_versions=">=0.27.0,<0.28.0",
+    remove_when="FlashAttentionBackend gates sinks through the selected implementation's capabilities.",
+)(bind_body(supports_combination, _flash_attn))
