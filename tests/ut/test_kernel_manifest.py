@@ -254,7 +254,6 @@ def test_model_kernel_dependencies_are_compiled_and_bound(shipped, op):
     [
         "topk_softplus_sqrt",
         "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert",
-        "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert_out",
         "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert",
         "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert",
     ],

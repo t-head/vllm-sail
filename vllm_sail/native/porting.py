@@ -87,6 +87,7 @@ _FP8_INTRINSICS = {
         "fp8_to_halfraw",
         "fp8x2_to_halfraw2",
         "halfraw_to_fp8",
+        "halfraw2_to_fp8x2",
     )
 }
 _FP8_TOKEN_RE = re.compile(
