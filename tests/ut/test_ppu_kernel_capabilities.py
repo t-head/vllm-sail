@@ -441,8 +441,9 @@ def test_deepseek_config_preserves_dense_channelwise_patterns_for_mtp(modules):
         (None, None, (False, False, False)),
     ],
 )
+@pytest.mark.parametrize("explicit_manager", [False, True])
 def test_deepep_factory_uses_bound_globals_and_quantized_protocol(
-    modules, quant_dtype, block, expected
+    modules, quant_dtype, block, expected, explicit_manager
 ):
     """Execute the installed factory, including its ordinary non-EP branch."""
     ns = types.SimpleNamespace
@@ -458,6 +459,10 @@ def test_deepep_factory_uses_bound_globals_and_quantized_protocol(
     def original(*args, **kwargs):
         return "original"
 
+    def get_manager():
+        assert not explicit_manager, "an explicitly supplied manager must be retained"
+        return manager
+
     provider = modules(
         "vllm.model_executor.layers.fused_moe.all2all_utils",
         current_platform=platform,
@@ -465,7 +470,7 @@ def test_deepep_factory_uses_bound_globals_and_quantized_protocol(
         maybe_make_prepare_finalize=original,
         maybe_roundup_layer_hidden_size=lambda *args: "upstream-roundup",
         make_moe_prepare_and_finalize_no_dp_ep=lambda flag: ("no-ep", flag),
-        get_ep_all2all_manager=lambda stage: manager,
+        get_ep_all2all_manager=get_manager,
         DEEPEP_QUANT_BLOCK_SHAPE=[128, 128],
     )
     consumer = modules(
@@ -490,7 +495,10 @@ def test_deepep_factory_uses_bound_globals_and_quantized_protocol(
     moe.hidden_dim = 3584
     moe.num_experts = 16
     result = consumer.maybe_make_prepare_finalize(
-        moe, ns(quant_dtype=quant_dtype, block_shape=block), ("g2p", "p2g", "ids")
+        moe,
+        ns(quant_dtype=quant_dtype, block_shape=block),
+        ("g2p", "p2g", "ids"),
+        all2all_manager=manager if explicit_manager else None,
     )
     assert (
         result.use_fp8_dispatch,
