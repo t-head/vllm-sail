@@ -44,10 +44,14 @@ _upstream_get_mla_metadata = _flashmla_ops.get_mla_metadata
 _FLASHMLA_ALIAS_CONSUMERS = {
     "flash_mla_sparse_fwd": (
         "vllm.models.deepseek_v4.nvidia.flashmla",
+        "vllm.models.deepseek_v41.nvidia.flashmla",
+        "vllm.models.hy_v4.nvidia.flashmla_sparse",
         "vllm.v1.attention.backends.mla.flashmla_sparse",
     ),
     "flash_mla_with_kvcache": (
         "vllm.models.deepseek_v4.nvidia.flashmla",
+        "vllm.models.deepseek_v41.nvidia.flashmla",
+        "vllm.models.hy_v4.nvidia.flashmla_sparse",
         "vllm.v1.attention.backends.mla.flashmla",
         "vllm.v1.attention.backends.mla.flashmla_sparse",
     ),
@@ -62,7 +66,7 @@ _FLASHMLA_ALIAS_CONSUMERS = {
 }
 
 _ALIAS_REASON = (
-    "vLLM 0.27 captured the upstream FlashMLA op before PPU patch "
+    "vLLM 0.30 captured the upstream FlashMLA op before PPU patch "
     "installation, so the consumer would bypass the PPU provider or retain "
     "CUDA-only capability checks."
 )
@@ -256,7 +260,7 @@ def _rebind_loaded_flashmla_aliases() -> None:
             if original is None or captured is not original:
                 raise RuntimeError(
                     f"{consumer_name}.{alias_name} is not the expected "
-                    "vLLM 0.27 FlashMLA alias"
+                    "vLLM 0.30 FlashMLA alias"
                 )
             patch(
                 consumer_name,

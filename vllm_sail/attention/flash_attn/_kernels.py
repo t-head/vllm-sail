@@ -195,6 +195,7 @@ def flash_attn_varlen_func(
     # FA4 only
     mask_mod=None,
     aux_tensors=None,
+    aux_tensor_leading_dims=None,
     dynamic_causal: "torch.Tensor | None" = None,
 ):
     """dropout_p should be set to 0.0 during evaluation

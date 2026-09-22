@@ -22,7 +22,9 @@ def get_flash_attn_version(
     head_size: int | None = None,
     head_size_v: int | None = None,
     has_sinks: bool = False,
-    requires_local_attention: bool = False,
+    requires_softcap: bool = False,
+    kv_cache_block_size: int | None = None,
+    supports_fa4_hd256: bool = False,
 ) -> int | None:
     if current_platform.is_xpu():
         return 2
@@ -124,28 +126,31 @@ def get_flash_attn_version(
             )
             fa_version = 2
 
-        if (
-            fa_version == 4
-            and device_capability.major >= 10
-            and head_size == 256
-            and requires_local_attention
-        ):
-            logger.warning_once(
-                "FA4 on Blackwell does not support local attention with "
-                "head_size=256, defaulting to FA version 2."
-            )
-            fa_version = 2
+        if fa_version == 4 and uses_fa4_hd256_kernel(head_size, head_size_v):
+            if not supports_fa4_hd256:
+                fa_version = 2
+            elif (
+                reason := _fa4_hd256_fallback_reason(
+                    has_sinks, requires_softcap, kv_cache_block_size, vllm_config
+                )
+            ) is not None:
+                logger.warning_once(
+                    "FA4's Blackwell head_size=256 kernel does not support %s, "
+                    "defaulting to FA version 2.",
+                    reason,
+                )
+                fa_version = 2
 
-        # FA4 on SM100 (Blackwell) has TMEM capacity limits that restrict
-        # supported head dimensions to ≤128, with exceptions for 256 and 192/128 (MLA
-        # prefill). Development of symmetric 192, 384, and 512 support is being tracked
-        # in https://github.com/Dao-AILab/flash-attention/issues/2456
+        # FA4 head dimensions on Blackwell are limited by TMEM capacity.
         if (
             fa_version == 4
             and device_capability.major >= 10
             and head_size is not None
             and head_size > 128
-            and not (head_size == 256 or (head_size == 192 and head_size_v == 128))
+            and not (
+                (head_size == 256 and head_size_v in (None, 256))
+                or (head_size == 192 and head_size_v == 128)
+            )
         ):
             logger.warning_once(
                 "FA4 on Blackwell does not support head_size=%d due to TMEM "
@@ -183,6 +188,9 @@ def flash_attn_supports_kv_cache_dtype(
     head_size: int | None = None,
     head_size_v: int | None = None,
     has_sinks: bool = False,
+    requires_softcap: bool = False,
+    kv_cache_block_size: int | None = None,
+    supports_fa4_hd256: bool = False,
 ) -> bool:
     if kv_cache_dtype == "fp8_e5m2":
         return False
@@ -193,6 +201,9 @@ def flash_attn_supports_kv_cache_dtype(
         head_size=head_size,
         head_size_v=head_size_v,
         has_sinks=has_sinks,
+        requires_softcap=requires_softcap,
+        kv_cache_block_size=kv_cache_block_size,
+        supports_fa4_hd256=supports_fa4_hd256,
     )
     # PPU MODIFICATION: begin
     if current_platform.is_ppu():

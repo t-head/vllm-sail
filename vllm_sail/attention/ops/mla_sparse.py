@@ -88,7 +88,7 @@ def ppu_sparse_attn_indexer(
     kv_cache: torch.Tensor,
     q_quant: torch.Tensor,
     q_scale: torch.Tensor | None,
-    k: torch.Tensor,
+    k: torch.Tensor | None,
     weights: torch.Tensor,
     quant_block_size: int,
     scale_fmt: str | None,
@@ -99,6 +99,9 @@ def ppu_sparse_attn_indexer(
     topk_indices_buffer: torch.Tensor,
     skip_k_cache_insert: bool,
     use_fp4_cache: bool = False,
+    candidate_blocks: torch.Tensor | None = None,
+    candidate_block_size: int = 0,
+    candidate_write: bool = False,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
@@ -143,6 +146,9 @@ def ppu_sparse_attn_indexer(
             topk_indices_buffer,
             skip_k_cache_insert,
             use_fp4_cache,
+            candidate_blocks,
+            candidate_block_size,
+            candidate_write,
         )
     attn_metadata_narrowed = attn_metadata[k_cache_prefix]
     assert isinstance(attn_metadata_narrowed, DeepseekV32IndexerMetadata)
@@ -254,11 +260,22 @@ def ppu_sparse_attn_indexer(
                         clean_logits=False,
                     )
                 else:
-                    raise RuntimeError(f"PPU mqa_logits get unsupported q_dtype: {q_dtype}")
+                    raise RuntimeError(
+                        f"PPU mqa_logits get unsupported q_dtype: {q_dtype}"
+                    )
             else:
                 raise RuntimeError("indexer need PPU deep gemm installed")
 
             num_rows = logits.shape[0]
+            if candidate_blocks is not None:
+                _filter_candidates(
+                    logits,
+                    chunk.cu_seqlen_ks,
+                    chunk.cu_seqlen_ke,
+                    candidate_blocks[chunk.token_start : chunk.token_end],
+                    candidate_block_size,
+                    candidate_write,
+                )
 
             topk_indices = topk_indices_buffer[
                 chunk.token_start : chunk.token_end, :topk_tokens
@@ -373,10 +390,24 @@ def ppu_sparse_attn_indexer(
                     clean_logits=False,
                 )
             else:
-                raise RuntimeError(f"PPU paged mqa_logits get unsupported q_dtype: {q_dtype}")
+                raise RuntimeError(
+                    f"PPU paged mqa_logits get unsupported q_dtype: {q_dtype}"
+                )
         else:
             raise RuntimeError("indexer need ppu deep gemm installed")
         num_rows = logits.shape[0]
+        if candidate_blocks is not None:
+            vis = seq_lens.reshape(-1)
+            row_repeat = next_n if vis.numel() != num_rows else 1
+            _filter_candidates(
+                logits,
+                None,
+                vis[:num_rows],
+                candidate_blocks[:num_rows],
+                candidate_block_size,
+                candidate_write,
+                row_repeat,
+            )
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
         if topk_tokens in (512, 1024, 2048):
@@ -424,7 +455,7 @@ def ppu_sparse_attn_indexer_fake(
     kv_cache: torch.Tensor,
     q_quant: torch.Tensor,
     q_scale: torch.Tensor | None,
-    k: torch.Tensor,
+    k: torch.Tensor | None,
     weights: torch.Tensor,
     quant_block_size: int,
     scale_fmt: str | None,
@@ -435,5 +466,31 @@ def ppu_sparse_attn_indexer_fake(
     topk_indices_buffer: torch.Tensor | None,
     skip_k_cache_insert: bool,
     use_fp4_cache: bool = False,
+    candidate_blocks: torch.Tensor | None = None,
+    candidate_block_size: int = 0,
+    candidate_write: bool = False,
 ) -> torch.Tensor:
     return topk_indices_buffer
+
+
+def _filter_candidates(
+    logits, starts, ends, candidates, block_size, write, row_repeat=1
+):
+    from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
+        apply_candidate_mask,
+        select_candidate_blocks,
+    )
+
+    assert block_size > 0
+    if write:
+        select_candidate_blocks(
+            logits,
+            starts,
+            ends,
+            candidates.shape[1],
+            block_size,
+            candidates,
+            row_repeat,
+        )
+    else:
+        apply_candidate_mask(logits, starts, ends, candidates, block_size, row_repeat)

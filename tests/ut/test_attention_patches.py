@@ -34,12 +34,17 @@ _PRELOADED_FLASHMLA_BACKEND = importlib.import_module(
 
 @pytest.fixture(scope="module")
 def installed():
+    # The platform entry point installs the FA shim before the general hook.
+    # Direct patch.install() alone does not reproduce that startup sequence.
+    import vllm_sail
+
+    vllm_sail.register()
     patch_pkg.install()
     return PATCH_REGISTRY
 
 
 def _unwrap(attribute):
-    if isinstance(attribute, (staticmethod, classmethod)):
+    if isinstance(attribute, staticmethod | classmethod):
         return attribute.__func__
     if isinstance(attribute, property):
         return attribute.fget
@@ -89,13 +94,16 @@ _ATTENTION_TARGETS = (
     ),
     (
         "vllm.model_executor.layers.attention.mla_attention",
-        "MLACommonBaseImpl._compute_prefill_context",
+        "_get_kv_b_proj_input_dtype",
     ),
     (
         "vllm.v1.attention.backends.mla.indexer",
         "get_paged_mqa_logits_metadata",
     ),
-    ("vllm.v1.attention.backends.mla.indexer", "split_indexer_prefill_chunks"),
+    (
+        "vllm.v1.attention.backends.mla.indexer",
+        "DeepseekV32IndexerMetadataBuilder._split_indexer_prefill_chunks",
+    ),
     (
         "vllm.v1.attention.backends.mla.indexer",
         "DeepseekV32IndexerMetadataBuilder.__init__",
