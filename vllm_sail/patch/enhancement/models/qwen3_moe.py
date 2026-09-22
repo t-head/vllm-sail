@@ -88,10 +88,16 @@ def sparse_moe_block_init(
     vllm_config: VllmConfig,
     quant_config=_UNSET,
     prefix: str = "",
+    is_fused_checkpoint_transposed: bool = False,
 ):
     if quant_config is not _UNSET:
         vllm_config = _with_quant_config(vllm_config, quant_config)
-    _upstream_moe_block_init(self, vllm_config=vllm_config, prefix=prefix)
+    _upstream_moe_block_init(
+        self,
+        vllm_config=vllm_config,
+        prefix=prefix,
+        is_fused_checkpoint_transposed=is_fused_checkpoint_transposed,
+    )
 
 
 @patch(
@@ -104,8 +110,7 @@ def sparse_moe_block_init(
     ),
     affected_versions=_AFFECTED,
     remove_when=(
-        "upstream threads a per-layer quant_config through "
-        "Qwen3MoeDecoderLayer itself."
+        "upstream threads a per-layer quant_config through Qwen3MoeDecoderLayer itself."
     ),
 )
 def decoder_layer_init(
@@ -113,10 +118,16 @@ def decoder_layer_init(
     vllm_config: VllmConfig,
     quant_config=_UNSET,
     prefix: str = "",
+    is_fused_checkpoint_transposed: bool = False,
 ) -> None:
     if quant_config is not _UNSET:
         vllm_config = _with_quant_config(vllm_config, quant_config)
-    _upstream_decoder_layer_init(self, vllm_config=vllm_config, prefix=prefix)
+    _upstream_decoder_layer_init(
+        self,
+        vllm_config=vllm_config,
+        prefix=prefix,
+        is_fused_checkpoint_transposed=is_fused_checkpoint_transposed,
+    )
 
 
 @patch(
@@ -130,8 +141,7 @@ def decoder_layer_init(
     ),
     affected_versions=_AFFECTED,
     remove_when=(
-        "upstream Qwen3MoeModel honours quantization_config.mix_layer "
-        "itself."
+        "upstream Qwen3MoeModel honours quantization_config.mix_layer itself."
     ),
 )
 def model_init(
@@ -154,13 +164,14 @@ def model_init(
     # PPU MODIFICATION: begin — per-layer quant override (fork's create_layer).
     # Upstream calls decoder_layer_type(vllm_config=..., prefix=...), so the
     # substituted factory keeps that calling convention.
-    def create_layer(*, vllm_config: VllmConfig, prefix: str):
+    def create_layer(*, vllm_config: VllmConfig, prefix: str, **kwargs):
         layer_idx = extract_layer_index(prefix)
-        per_layer_qcfg = (
-            None if layer_idx in mix_layer else vllm_config.quant_config
-        )
+        per_layer_qcfg = None if layer_idx in mix_layer else vllm_config.quant_config
         return decoder_layer_type(
-            vllm_config=vllm_config, quant_config=per_layer_qcfg, prefix=prefix
+            vllm_config=vllm_config,
+            quant_config=per_layer_qcfg,
+            prefix=prefix,
+            **kwargs,
         )
 
     _upstream_model_init(

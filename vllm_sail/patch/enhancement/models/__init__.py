@@ -18,7 +18,6 @@ Modules, and why each is import-on-install like the rest of the framework:
   quantization-specific weights mapper remains plugin-local so CUDA behavior
   is unchanged.
 * ``llama4`` — torch.compile on the custom router (+1).
-* ``qwen3_dspark`` — quant_config plumbing into the Markov head (+4).
 * ``qwen3_moe`` — per-layer mix_layer quant overrides (+36).
 * ``qwen3_next`` — NVTX profiling scaffold (+19).
 * ``step3p5_mtp`` — zero-point buffers as optional checkpoint params (+12).
@@ -34,7 +33,6 @@ from vllm_sail.patch.enhancement.models import (
     deepseek_v4_metadata,  # noqa: F401
     llama4,  # noqa: F401
     moe_marlin_gate,  # noqa: F401
-    qwen3_dspark,  # noqa: F401
     qwen3_moe,  # noqa: F401
     qwen3_next,  # noqa: F401
     step3p5_mtp,  # noqa: F401
