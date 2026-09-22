@@ -866,15 +866,11 @@ class PPUBatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
                     1
                 ]
             )
-        self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
-        # Gated-activation params: silu == swigluoai with alpha=1, beta=0.
-        # FP8 (silu) configs leave these None, reproducing plain silu.
-        self.gemm1_alpha = (
-            quant_config.gemm1_alpha if quant_config.gemm1_alpha is not None else 1.0
-        )
-        self.gemm1_beta = (
-            quant_config.gemm1_beta if quant_config.gemm1_beta is not None else 0.0
-        )
+        # Fused PPU kernels and the upstream fallback share the configuration
+        # built by FusedMoEExperts.__init__ via from_configs(moe_config, quant_config).
+        self.gemm1_clamp_limit = self.activation_config.clamp_limit
+        self.gemm1_alpha = self.activation_config.alpha
+        self.gemm1_beta = self.activation_config.beta
         self.activation_situ_beta = (
             moe_config.activation_situ_beta
             if moe_config.activation_situ_beta is not None
@@ -1282,15 +1278,11 @@ class PPUBatchedDeepGemmExpertsMXFP4(mk.FusedMoEExpertsModular):
             max_num_tokens=max_num_tokens,
             num_dispatchers=num_dispatchers,
         )
-        self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
-        # Gated-activation params: silu == swigluoai with alpha=1, beta=0.
-        # FP8 (silu) configs leave these None, reproducing plain silu.
-        self.gemm1_alpha = (
-            quant_config.gemm1_alpha if quant_config.gemm1_alpha is not None else 1.0
-        )
-        self.gemm1_beta = (
-            quant_config.gemm1_beta if quant_config.gemm1_beta is not None else 0.0
-        )
+        # Fused PPU kernels and the upstream fallback share the configuration
+        # built by FusedMoEExperts.__init__ via from_configs(moe_config, quant_config).
+        self.gemm1_clamp_limit = self.activation_config.clamp_limit
+        self.gemm1_alpha = self.activation_config.alpha
+        self.gemm1_beta = self.activation_config.beta
         self.activation_situ_beta = (
             moe_config.activation_situ_beta
             if moe_config.activation_situ_beta is not None
@@ -1473,23 +1465,18 @@ class PPUBatchedDeepGemmExpertsMXFP4(mk.FusedMoEExpertsModular):
             # fp4_m_grouped_gemm_nt_masked expects [E, T, H//32//2], so permute.
             a2q_scale = a2q_scale.permute(0, 2, 1)
         else:
-            # Fallback for SWIGLUSTEP / SWIGLUOAI: reshape (E,T,2H) -> (E*T, 2H),
-            # apply 2D-only activation, reshape back, then quantise separately.
-            act_out_2d = torch.empty(
-                (E * max_num_tokens, activation_out_dim),
+            # Keep expert boundaries for the new masked activation contract.
+            act_out = torch.zeros(
+                (E, max_num_tokens, activation_out_dim),
                 dtype=workspace1.dtype,
                 device=workspace1.device,
             )
-
             self.activation(
                 activation,
-                act_out_2d,
-                workspace1.view(E * max_num_tokens, N),
-                clamp_limit=self.gemm1_clamp_limit,
-                alpha=self.gemm1_alpha,
-                beta=self.gemm1_beta,
+                act_out,
+                workspace1,
+                valid_token_counts=expert_num_tokens,
             )
-            act_out = act_out_2d.view(E, max_num_tokens, activation_out_dim)
             a2q, a2q_scale = downcast_to_mxfp4(act_out, axis=-1)
 
         # for mxfp4, output hidden_size = K * 2 (unpacked)

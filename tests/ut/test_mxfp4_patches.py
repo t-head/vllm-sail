@@ -31,7 +31,7 @@ MODULE_PATH = (
     Path(__file__).parents[2] / "vllm_sail" / "patch" / "enhancement" / "mxfp4.py"
 )
 REQUIRED_METADATA = ("reason", "affected_versions", "remove_when")
-N_TARGETS = 11
+N_TARGETS = 10
 
 
 @pytest.fixture()
@@ -160,11 +160,11 @@ def _build_stub_vllm(
         state.upstream_make_quant_config.append(kwargs)
         return ("upstream-quant-config", kwargs)
 
-    def convert_weight(*args):
+    def convert_weight(*args, activation=None):
         state.upstream_convert.append(args)
         return ("upstream-convert",)
 
-    def round_up_sizes(backend, hidden_size, intermediate_size):
+    def round_up_sizes(backend, hidden_size, intermediate_size, activation=None):
         state.upstream_round_up.append((backend, hidden_size, intermediate_size))
         return hidden_size, intermediate_size
 
@@ -488,41 +488,23 @@ def test_apply_vllm_mapper_remaps_channelwise_on_ppu(
     _Platform.ppu = True
 
 
-def test_method_init_selects_w4a4_on_ppu(
+def test_method_initialization_preserves_upstream_factory(
     monkeypatch: pytest.MonkeyPatch, mxfp4_module
 ) -> None:
     state, modules = _build_stub_vllm(monkeypatch)
+    cls = modules["quant_mxfp4"].Mxfp4MoEMethod
+    upstream_init = cls.__init__
     mxfp4_module.install()
-    oracle = modules["oracle"]
-    Mxfp4MoEMethod = modules["quant_mxfp4"].Mxfp4MoEMethod
-    GptOssMxfp4MoEMethod = modules["quant_mxfp4"].GptOssMxfp4MoEMethod
+    # vLLM 0.30 owns construction and calls the separately registered
+    # DeepSeek V4 backend selector. The quantization patch must not replace it.
+    assert cls.__init__ is upstream_init
     moe = types.SimpleNamespace(max_capture_size=8, moe_backend="auto")
-
-    _Platform.ppu, _Platform.sm80 = True, False
-    state.select_calls.clear()
-    method = Mxfp4MoEMethod(moe)
-    assert method.mxfp4_backend == oracle.Mxfp4MoeBackend.PPU_DEEPGEMM_MXFP4
-    assert state.select_calls == [{"moe": moe, "activation_key": oracle.kMxfp4Dynamic}]
-    assert state.upstream_method_init == []
-    assert method.max_capture_size == 8
-    assert method.moe_kernel is None
-
-    _Platform.sm80 = True
-    state.select_calls.clear()
-    Mxfp4MoEMethod(moe)
-    assert state.select_calls == [{"moe": moe, "activation_key": None}]
-
-    _Platform.ppu, _Platform.sm80 = False, False
-    state.select_calls.clear()
-    state.upstream_method_init.clear()
-    Mxfp4MoEMethod(moe)
-    assert state.select_calls == []
+    cls(moe)
     assert state.upstream_method_init == [moe]
 
-    _Platform.ppu = True
-    state.select_calls.clear()
-    GptOssMxfp4MoEMethod(moe)
-    # Upstream init ran, then the PPU override re-selected with the W4A4 key.
+    oracle = modules["oracle"]
+    _Platform.ppu, _Platform.sm80 = True, False
+    modules["quant_mxfp4"].GptOssMxfp4MoEMethod(moe)
     assert state.upstream_gptoss_init == [moe]
     assert state.select_calls == [{"moe": moe, "activation_key": oracle.kMxfp4Dynamic}]
 

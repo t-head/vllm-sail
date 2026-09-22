@@ -14,58 +14,58 @@ _REMOVE_WHEN = (
     "capturing module-level aliases before plugin registration."
 )
 
-# Consumer groups share the same oracle imports. Keep their order stable: the
-# rebinding pass records patches in this order, after every backend has loaded.
-_FP8_QUANT_CONSUMERS = (
-    "vllm.model_executor.layers.quantization.fp8",
-    "vllm.model_executor.layers.quantization.modelopt",
-    "vllm.model_executor.layers.quantization.quark.quark_moe",
-    "vllm.model_executor.layers.quantization.compressed_tensors."
-    "compressed_tensors_moe.compressed_tensors_moe_w8a8_mxfp8",
-    "vllm.model_executor.layers.quantization.compressed_tensors."
-    "compressed_tensors_moe.compressed_tensors_moe_w8a8_fp8",
-)
-_INT8_CONSUMERS = (
-    "vllm.model_executor.layers.quantization.online.int8",
-    "vllm.model_executor.layers.quantization.compressed_tensors."
-    "compressed_tensors_moe.compressed_tensors_moe_w8a8_int8",
-    "vllm.model_executor.layers.quantization.quark.quark_moe",
-)
-_WNA16_CONSUMERS = (
-    "vllm.model_executor.layers.quantization.auto_awq",
-    "vllm.model_executor.layers.quantization.moe_wna16",
-    "vllm.model_executor.layers.quantization.auto_gptq",
-    "vllm.model_executor.layers.quantization.compressed_tensors."
-    "compressed_tensors_moe.compressed_tensors_moe_wna16",
-)
-
+# Module-scope consumers captured before plugin registration in vLLM 0.30.
 _ORACLE_ALIAS_CONSUMERS = {
     "unquantized": {
         "select_unquantized_moe_backend": (
             "vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method",
-        ),
+        )
     },
     "fp8": {
         "backend_to_kernel_cls": ("vllm.model_executor.layers.fused_moe.oracle.mxfp8",),
         "select_fp8_moe_backend": (
+            "vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w8a8_fp8",
             "vllm.model_executor.layers.quantization.fp8",
-            "vllm.model_executor.layers.quantization.compressed_tensors."
-            "compressed_tensors_moe.compressed_tensors_moe_w8a8_fp8",
+            "vllm.model_executor.layers.quantization.modelopt",
+            "vllm.model_executor.layers.quantization.online.fp8",
+            "vllm.model_executor.layers.quantization.quark.quark_moe",
+        ),
+        "convert_to_fp8_moe_kernel_format": (
+            "vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w8a8_fp8",
+            "vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w8a8_mxfp8",
+            "vllm.model_executor.layers.quantization.fp8",
+            "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp8_moe",
             "vllm.model_executor.layers.quantization.modelopt",
             "vllm.model_executor.layers.quantization.quark.quark_moe",
-            "vllm.model_executor.layers.quantization.online.fp8",
         ),
-        "convert_to_fp8_moe_kernel_format": _FP8_QUANT_CONSUMERS,
-        "make_fp8_moe_quant_config": _FP8_QUANT_CONSUMERS,
+        "make_fp8_moe_quant_config": (
+            "vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w8a8_fp8",
+            "vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w8a8_mxfp8",
+            "vllm.model_executor.layers.quantization.fp8",
+            "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp8_moe",
+            "vllm.model_executor.layers.quantization.modelopt",
+            "vllm.model_executor.layers.quantization.quark.quark_moe",
+        ),
     },
     "int8": {
-        "convert_to_int8_moe_kernel_format": _INT8_CONSUMERS,
-        "make_int8_moe_quant_config": _INT8_CONSUMERS,
-        "select_int8_moe_backend": _INT8_CONSUMERS,
+        "convert_to_int8_moe_kernel_format": (
+            "vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w8a8_int8",
+            "vllm.model_executor.layers.quantization.online.int8",
+            "vllm.model_executor.layers.quantization.quark.quark_moe",
+        ),
+        "make_int8_moe_quant_config": (
+            "vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w8a8_int8",
+            "vllm.model_executor.layers.quantization.online.int8",
+            "vllm.model_executor.layers.quantization.quark.quark_moe",
+        ),
+        "select_int8_moe_backend": (
+            "vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w8a8_int8",
+            "vllm.model_executor.layers.quantization.online.int8",
+            "vllm.model_executor.layers.quantization.quark.quark_moe",
+        ),
     },
     "mxfp4": {
         "backend_to_kernel_cls": (
-            "vllm.model_executor.layers.quantization.mxfp4",
             "vllm.model_executor.layers.quantization.quark.quark_moe",
         ),
         "convert_gpt_oss_weight_to_mxfp4_moe_kernel_format": (
@@ -74,35 +74,57 @@ _ORACLE_ALIAS_CONSUMERS = {
         ),
         "convert_weight_to_mxfp4_moe_kernel_format": (
             "vllm.model_executor.layers.quantization.mxfp4",
+            "vllm.model_executor.layers.quantization.online.mxfp4",
         ),
         "make_mxfp4_moe_quant_config": (
-            "vllm.model_executor.layers.quantization.mxfp4",
-            "vllm.model_executor.layers.quantization.quark.quark_moe",
-            "vllm.model_executor.layers.quantization.compressed_tensors."
-            "compressed_tensors_moe.compressed_tensors_moe_w4a4_mxfp4",
+            "vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a4_mxfp4",
             "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_moe",
+            "vllm.model_executor.layers.quantization.mxfp4",
+            "vllm.model_executor.layers.quantization.online.mxfp4",
+            "vllm.model_executor.layers.quantization.quark.quark_moe",
         ),
         "mxfp4_round_up_hidden_size_and_intermediate_size": (
             "vllm.model_executor.layers.quantization.mxfp4",
+            "vllm.model_executor.layers.quantization.online.mxfp4",
             "vllm.model_executor.layers.quantization.quark.quark_moe",
         ),
         "select_mxfp4_moe_backend": (
-            "vllm.model_executor.layers.quantization.mxfp4",
-            "vllm.model_executor.layers.quantization.quark.quark_moe",
+            "vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a4_mxfp4",
             "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_moe",
+            "vllm.model_executor.layers.quantization.mxfp4",
+            "vllm.model_executor.layers.quantization.online.mxfp4",
+            "vllm.model_executor.layers.quantization.quark.quark_moe",
+        ),
+        "select_deepseek_v4_mxfp4_moe_backend": (
+            "vllm.model_executor.layers.quantization.mxfp4",
         ),
     },
     "int_wna16": {
         "backend_to_kernel_cls": (),
-        "select_wna16_moe_backend": _WNA16_CONSUMERS,
-        "make_wna16_moe_kernel": _WNA16_CONSUMERS,
-        "convert_to_wna16_moe_kernel_format": _WNA16_CONSUMERS,
+        "select_wna16_moe_backend": (
+            "vllm.model_executor.layers.quantization.auto_awq",
+            "vllm.model_executor.layers.quantization.auto_gptq",
+            "vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16",
+            "vllm.model_executor.layers.quantization.moe_wna16",
+        ),
+        "make_wna16_moe_kernel": (
+            "vllm.model_executor.layers.quantization.auto_awq",
+            "vllm.model_executor.layers.quantization.auto_gptq",
+            "vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16",
+            "vllm.model_executor.layers.quantization.moe_wna16",
+        ),
+        "convert_to_wna16_moe_kernel_format": (
+            "vllm.model_executor.layers.quantization.auto_awq",
+            "vllm.model_executor.layers.quantization.auto_gptq",
+            "vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16",
+            "vllm.model_executor.layers.quantization.moe_wna16",
+        ),
     },
 }
 
 
 def _rebind_loaded_oracle_aliases(backend_modules: dict[str, object]) -> None:
-    """Update vLLM 0.27 consumers that captured patched oracle functions."""
+    """Update vLLM 0.30 consumers that captured patched oracle functions."""
     import importlib
     import sys
 
@@ -133,14 +155,14 @@ def _rebind_loaded_oracle_aliases(backend_modules: dict[str, object]) -> None:
                 if upstream is None or captured is not upstream:
                     raise RuntimeError(
                         f"{consumer_name}.{alias_name} is not the expected "
-                        "vLLM 0.27 oracle alias"
+                        "vLLM 0.30 oracle alias"
                     )
 
                 patch(
                     consumer_name,
                     alias_name,
                     reason=(
-                        "vLLM 0.27 captured this MoE oracle function before "
+                        "vLLM 0.30 captured this MoE oracle function before "
                         "PPU registration, so the consumer would bypass PPU "
                         "DeepGEMM selection or preparation."
                     ),

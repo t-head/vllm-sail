@@ -102,12 +102,6 @@ METADATA = (
         REMOVE_WHEN,
     ),
     (
-        f"{_QMODULE}.Mxfp4MoEMethod.__init__",
-        REASON_METHOD_SELECT,
-        AFFECTED_VERSIONS,
-        REMOVE_WHEN,
-    ),
-    (
         f"{_QMODULE}.Mxfp4MoEMethod.get_fused_moe_quant_config",
         REASON_QUANT_CONFIG,
         AFFECTED_VERSIONS,
@@ -174,19 +168,16 @@ def install() -> None:
     from vllm.model_executor.layers.quantization.utils.quant_utils import (
         is_layer_skipped,
     )
+
     _upstream_config_init = _quant.Mxfp4Config.__init__
     _upstream_get_quant_method = _quant.Mxfp4Config.get_quant_method
     _upstream_apply_mapper = _quant.Mxfp4Config.apply_vllm_mapper
     _upstream_gptoss_init = _quant.GptOssMxfp4MoEMethod.__init__
-    _upstream_method_init = _quant.Mxfp4MoEMethod.__init__
     _upstream_get_fm_quant_config = _quant.Mxfp4MoEMethod.get_fused_moe_quant_config
     _upstream_make_quant_config = oracle.make_mxfp4_moe_quant_config
     _upstream_convert_weight = oracle.convert_weight_to_mxfp4_moe_kernel_format
-    _upstream_convert_gpt_oss = (
-        oracle.convert_gpt_oss_weight_to_mxfp4_moe_kernel_format
-    )
+    _upstream_convert_gpt_oss = oracle.convert_gpt_oss_weight_to_mxfp4_moe_kernel_format
     _upstream_round_up = oracle.mxfp4_round_up_hidden_size_and_intermediate_size
-    _method_base = _quant.Mxfp4MoEMethod.__mro__[1]
 
     @patch(
         _QMODULE,
@@ -296,7 +287,9 @@ def install() -> None:
         """The fork's PPU backend selection: W4A4 on sm90+, W4A16 on sm80."""
         from vllm.platforms import current_platform
 
-        if not current_platform.is_device_capability((8, 0)) and moe.moe_backend not in ("marlin", "ppu_deep_gemm_w4a16"):
+        if not current_platform.is_device_capability(
+            (8, 0)
+        ) and moe.moe_backend not in ("marlin", "ppu_deep_gemm_w4a16"):
             return oracle.select_mxfp4_moe_backend(
                 moe, activation_key=oracle.kMxfp4Dynamic
             )
@@ -315,32 +308,6 @@ def install() -> None:
 
         if current_platform.is_ppu():
             self.mxfp4_backend, self.experts_cls = _ppu_select(moe)
-
-    @patch(
-        _QMODULE,
-        "Mxfp4MoEMethod.__init__",
-        reason=REASON_METHOD_SELECT,
-        affected_versions=AFFECTED_VERSIONS,
-        remove_when=REMOVE_WHEN,
-    )
-    def _method_init(self, moe) -> None:
-        from vllm.platforms import current_platform
-
-        if not current_platform.is_ppu():
-            _upstream_method_init(self, moe)
-            return
-        # PPU MODIFICATION: the fork replaces the upstream selection chain
-        # with PPU W4A4/W4A16 selection; the remaining attributes mirror the
-        # upstream body.
-        _method_base.__init__(self, moe)
-        self.weight_dtype = "mxfp4"
-        self.is_k3_situ_aiter = _quant._use_k3_situ_aiter(moe)
-        self.mxfp4_backend, self.experts_cls = _ppu_select(moe)
-        self.max_capture_size = moe.max_capture_size
-        self._cache_permute_indices = {}
-        self.moe_kernel = None
-        self.w13_precision_config = None
-        self.w2_precision_config = None
 
     @patch(
         _QMODULE,
@@ -463,20 +430,33 @@ def install() -> None:
         w13_bias: torch.Tensor | None = None,
         w2_bias: torch.Tensor | None = None,
         _cache_permute_indices: dict | None = None,
+        activation=None,
     ):
         if mxfp4_backend in _ppu_backends("bf16"):
             import vllm.envs as envs
+
             if (envs.VLLM_MARLIN_INPUT_DTYPE or "").lower() in ("int8", "fp8"):
-                raise ValueError("PPU MXFP4 BF16 experts require 16-bit activation weight packing; unset VLLM_MARLIN_INPUT_DTYPE.")
+                raise ValueError(
+                    "PPU MXFP4 BF16 experts require 16-bit activation weight packing; unset VLLM_MARLIN_INPUT_DTYPE."
+                )
             mxfp4_backend = oracle.Mxfp4MoeBackend.MARLIN
         if mxfp4_backend in _ppu_backends("mma"):
             from vllm_sail.model_executor.layers.fused_moe.deep_gemm_utils import (
                 preprocess_mxfp4_w4a16_scales,
             )
-            return (w13_weight, w2_weight,
-                    torch.nn.Parameter(preprocess_mxfp4_w4a16_scales(w13_weight_scale), requires_grad=False),
-                    torch.nn.Parameter(preprocess_mxfp4_w4a16_scales(w2_weight_scale), requires_grad=False),
-                    w13_bias, w2_bias)
+
+            return (
+                w13_weight,
+                w2_weight,
+                torch.nn.Parameter(
+                    preprocess_mxfp4_w4a16_scales(w13_weight_scale), requires_grad=False
+                ),
+                torch.nn.Parameter(
+                    preprocess_mxfp4_w4a16_scales(w2_weight_scale), requires_grad=False
+                ),
+                w13_bias,
+                w2_bias,
+            )
         if mxfp4_backend in _ppu_backends("w4a4"):
             return _convert_ppu_weights(
                 w13_weight,
@@ -496,6 +476,7 @@ def install() -> None:
             w13_bias,
             w2_bias,
             _cache_permute_indices,
+            activation=activation,
         )
 
     @patch(
@@ -520,17 +501,29 @@ def install() -> None:
     ):
         if mxfp4_backend in _ppu_backends("bf16"):
             import vllm.envs as envs
+
             if (envs.VLLM_MARLIN_INPUT_DTYPE or "").lower() in ("int8", "fp8"):
-                raise ValueError("PPU MXFP4 BF16 experts require 16-bit activation weight packing; unset VLLM_MARLIN_INPUT_DTYPE.")
+                raise ValueError(
+                    "PPU MXFP4 BF16 experts require 16-bit activation weight packing; unset VLLM_MARLIN_INPUT_DTYPE."
+                )
             mxfp4_backend = oracle.Mxfp4MoeBackend.MARLIN
         if mxfp4_backend in _ppu_backends("mma"):
             from vllm_sail.model_executor.layers.fused_moe.deep_gemm_utils import (
                 preprocess_mxfp4_w4a16_scales,
             )
-            return (w13_weight, w2_weight,
-                    torch.nn.Parameter(preprocess_mxfp4_w4a16_scales(w13_weight_scale), requires_grad=False),
-                    torch.nn.Parameter(preprocess_mxfp4_w4a16_scales(w2_weight_scale), requires_grad=False),
-                    w13_bias, w2_bias)
+
+            return (
+                w13_weight,
+                w2_weight,
+                torch.nn.Parameter(
+                    preprocess_mxfp4_w4a16_scales(w13_weight_scale), requires_grad=False
+                ),
+                torch.nn.Parameter(
+                    preprocess_mxfp4_w4a16_scales(w2_weight_scale), requires_grad=False
+                ),
+                w13_bias,
+                w2_bias,
+            )
         if mxfp4_backend in _ppu_backends("w4a4"):
             return _convert_ppu_weights(
                 w13_weight,
@@ -561,16 +554,25 @@ def install() -> None:
         affected_versions=AFFECTED_VERSIONS,
         remove_when=REMOVE_WHEN,
     )
-    def _round_up_sizes(backend, hidden_size: int, intermediate_size: int):
+    def _round_up_sizes(
+        backend, hidden_size: int, intermediate_size: int, activation=None
+    ):
         if backend in _ppu_backends():
             from vllm.utils.math_utils import round_up
 
             if backend in _ppu_backends("bf16"):
-                return _upstream_round_up(oracle.Mxfp4MoeBackend.MARLIN, hidden_size, intermediate_size)
+                return _upstream_round_up(
+                    oracle.Mxfp4MoeBackend.MARLIN,
+                    hidden_size,
+                    intermediate_size,
+                    activation=activation,
+                )
             alignment = 64 if backend in _ppu_backends("mma") else 32
             intermediate_size = round_up(intermediate_size, alignment)
             hidden_size = round_up(hidden_size, alignment)
             return hidden_size, intermediate_size
-        return _upstream_round_up(backend, hidden_size, intermediate_size)
+        return _upstream_round_up(
+            backend, hidden_size, intermediate_size, activation=activation
+        )
 
     _installed = True
