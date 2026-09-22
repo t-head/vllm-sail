@@ -28,7 +28,7 @@ need workload-specific tuning.
 | FlashAttention | PPU FlashAttention 2 and 3 integration | Matching SDK libraries; version selection follows availability and model constraints |
 | MLA and sparse attention | PPU FlashMLA integration and sparse indexer | Matching PPU libraries; FP8 dense FlashMLA decode is unavailable |
 | Gated delta networks | PLA and Triton paths for GDN | PLA availability and supported shapes determine dispatch |
-| Kimi delta attention | PLA and Triton paths for KDA | Backend and sequence-shape constraints apply |
+| Kimi delta attention | PLA and Triton paths for KDA | PLA prefill retains final recurrent state; intermediate prefill checkpoints are disabled. Backend and sequence-shape constraints apply |
 | Native operations | HGGC activation, normalization, quantization, routing, cache, sampling and model-specific kernels | Only the selected source corpus is compiled; each changed kernel needs device correctness tests |
 | Distributed MoE | DeepEP integration, including low-latency receive handling | Compatible PPU communication libraries and a validated multi-device setup |
 
