@@ -39,7 +39,7 @@ from vllm_sail.registry.tuned_configs import block_quant_config_path
 
 logger = init_logger(__name__)
 
-_AFFECTED = ">=0.27.0,<0.28.0"
+_AFFECTED = ">=0.30.0,<0.31.0"
 _REMOVE_WHEN = (
     "upstream gives get_w8a8_block_{fp8,int8}_configs a user-config-folder hook "
     "like fused_moe.get_moe_configs already has (envs.VLLM_TUNED_CONFIG_FOLDER)."

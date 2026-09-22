@@ -14,7 +14,7 @@ from vllm_sail.patch.utils import patch
 _MODULE = "vllm.models.kimi_k3.nvidia.kda"
 _META = dict(
     reason="Kimi KDA must select PPU PLA kernels instead of NVIDIA FlashKDA/native decode.",
-    affected_versions=">=0.27.0,<0.28.0",
+    affected_versions=">=0.30.0,<0.31.0",
     remove_when="Kimi KDA supports platform kernel registration for prefill and decode.",
 )
 

@@ -450,7 +450,7 @@ def test_phase4_metadata_shape(installed) -> None:
     ]
     assert len(records) >= 30, [r.target for r in records]
     for record in records:
-        assert record.affected_versions == ">=0.27.0,<0.28.0", record.target
+        assert record.affected_versions == ">=0.30.0,<0.31.0", record.target
         assert record.reason.strip(), record.target
         assert record.remove_when.strip(), record.target
         assert record.remove_when.strip().lower() != "todo", record.target

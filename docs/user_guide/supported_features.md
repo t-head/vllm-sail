@@ -12,7 +12,7 @@ support for a specific deployment.
 | Hardware | PPU cards ZW-810, ZW-810E and ZW-890 |
 | Native targets | PPU 1.0 (`ppu_10`) and PPU 1.5 (`ppu_15`) |
 | Bundled tuning data | Configurations include `PPU-ZW810`, `PPU-ZW810E` and `ZW-M890P`; coverage varies by shape and backend |
-| vLLM | `>=0.27.0,<0.28.0`; generated native sources pinned to v0.27.1 |
+| vLLM | `>=0.30.0,<0.31.0`; generated native sources pinned to v0.30.0 |
 | Python | 3.10–3.13 for the plugin and CPU test matrix; SDK wheel availability determines runtime combinations |
 
 A tuned configuration describes a measured kernel shape. It does not establish

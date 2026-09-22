@@ -8,7 +8,7 @@ from vllm_sail.registry.moe_backends._extend import extend_enum
 __all__ = ["extend_enum", "register"]
 
 _registered = False
-_AFFECTED = ">=0.27.0,<0.28.0"
+_AFFECTED = ">=0.30.0,<0.31.0"
 _REMOVE_WHEN = (
     "vLLM imports MoE selectors through a registration API instead of "
     "capturing module-level aliases before plugin registration."

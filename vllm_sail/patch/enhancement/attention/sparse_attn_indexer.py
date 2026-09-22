@@ -34,7 +34,7 @@ import vllm_sail.ops  # noqa: F401  (registers torch.ops.vllm.ppu_sparse_attn_in
 from vllm_sail.patch.utils import patch
 from vllm_sail.utils.deep_gemm import is_deep_gemm_supported
 
-_AFFECTED = ">=0.27.0,<0.28.0"
+_AFFECTED = ">=0.30.0,<0.31.0"
 _MODULE = "vllm.model_executor.layers.sparse_attn_indexer"
 
 logger = init_logger(__name__)

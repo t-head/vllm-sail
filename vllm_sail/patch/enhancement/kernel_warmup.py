@@ -77,7 +77,7 @@ else:
             "configs anyway. Appends the PPU DeepGEMM warmup with the fork's "
             "env gates after the upstream body."
         ),
-        affected_versions=">=0.27.0,<0.28.0",
+        affected_versions=">=0.30.0,<0.31.0",
         remove_when=(
             "upstream gives kernel_warmup a per-platform warmup registry (or "
             "vllm.utils.deep_gemm dispatches on current_platform), so the PPU "

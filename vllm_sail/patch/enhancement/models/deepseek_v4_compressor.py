@@ -175,6 +175,6 @@ patch(
         "shares CUDA identity but requires the Triton compressor. No "
         "compressor backend registration hook is available."
     ),
-    affected_versions=">=0.27.0,<0.28.0",
+    affected_versions=">=0.30.0,<0.31.0",
     remove_when="DeepseekCompressor selects compression through a backend capability hook.",
 )(bind_body(forward, _compressor))

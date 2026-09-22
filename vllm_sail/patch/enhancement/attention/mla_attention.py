@@ -30,7 +30,7 @@ from vllm.model_executor.layers.attention import mla_attention as _mla_attention
 
 from vllm_sail.patch.utils import patch
 
-_AFFECTED = ">=0.27.0,<0.28.0"
+_AFFECTED = ">=0.30.0,<0.31.0"
 _MODULE = "vllm.model_executor.layers.attention.mla_attention"
 
 

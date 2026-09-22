@@ -53,7 +53,7 @@ _QUANTIZE_INPUT_CONSUMERS = tuple(
         "prepare_finalize.no_dp_ep",
     )
 )
-AFFECTED_VERSIONS = ">=0.27.0,<0.28.0"
+AFFECTED_VERSIONS = ">=0.30.0,<0.31.0"
 
 REASON_DTYPE_STR = (
     "PPU int8 W8A8 MoE flows look up tuned configs by the name int8_w8a8; "
