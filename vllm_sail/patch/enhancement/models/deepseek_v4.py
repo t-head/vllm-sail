@@ -78,7 +78,6 @@ def fused_indexer_q_rope_quant(
     index_weights_softmax_scale,
     index_weights_head_scale,
     use_fp4=False,
-    output_buffers=None,
 ):
     original = getattr(fused_indexer_q_rope_quant, PATCH_MARKER)[
         f"{_Q_MODULE}.fused_indexer_q_rope_quant"
@@ -99,7 +98,6 @@ def fused_indexer_q_rope_quant(
             index_weights,
             index_weights_softmax_scale,
             index_weights_head_scale,
-            output_buffers=output_buffers,
         )
     return original(
         positions,
@@ -109,7 +107,6 @@ def fused_indexer_q_rope_quant(
         index_weights_softmax_scale,
         index_weights_head_scale,
         use_fp4=use_fp4,
-        output_buffers=output_buffers,
     )
 
 

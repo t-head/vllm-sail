@@ -32,9 +32,7 @@ def forward(
     if not isinstance(attn_metadata, dict):
         return
 
-    state_metadata = cast(
-        CompressorMetadata, attn_metadata[self.state_cache.prefix]
-    )
+    state_metadata = cast(CompressorMetadata, attn_metadata[self.state_cache.prefix])
     token_to_req_indices = state_metadata.token_to_req_indices
     slot_mapping = state_metadata.slot_mapping
     num_actual = slot_mapping.shape[0]
@@ -57,7 +55,7 @@ def forward(
     # GEMM; state_cache from this kernel) but neither emits/waits on PDL
     # grid dependency primitives, so launch_pdl=True caused a
     # read-after-write race and non-deterministic output.
-    save_partial_states(
+    _SAVE_PARTIAL_STATES_KERNEL(
         kv=kv,
         score=score,
         ape=self.ape,
@@ -106,26 +104,25 @@ def forward(
     # does not, so the two callables have different signatures.
     compress_norm_rope_store_fn: Any
     # PPU MODIFICATION: begin
-    if (current_platform.is_cuda() and not current_platform.is_ppu()
-            and self.head_dim == 512):
-    # PPU MODIFICATION: end
+    if (
+        current_platform.is_cuda()
+        and not current_platform.is_ppu()
+        and self.head_dim == 512
+    ):
+        # PPU MODIFICATION: end
         from .nvidia.ops.sparse_attn_compress_cutedsl import (
-            compress_norm_rope_store_cutedsl,
+            _SPARSE_ATTN_COMPRESSOR_CUTEDSL_KERNEL,
         )
 
         # head=512 on CUDA always uses cutedsl, for both the fp8_ds_mla
         # layout and the plain full-cache layout. The full-cache flags
         # are consumed only here.
-        compress_norm_rope_store_fn = compress_norm_rope_store_cutedsl
+        compress_norm_rope_store_fn = _SPARSE_ATTN_COMPRESSOR_CUTEDSL_KERNEL
         extra_kwargs: dict[str, Any] = dict(
             store_full_kv=store_full_kv,
             store_full_fp8=store_full_fp8,
             fp8_scale=fp8_scale,
         )
-        if not self.overlap and self.eager_scratch_pool is not None:
-            extra_kwargs["compress_scratch"] = (
-                self.eager_scratch_pool.compressor_scratch(num_actual)
-            )
     elif self._use_two_stage_fused_compressor:
         # head=512 cr>=128 (no overlap): two-pass split compressor on the
         # prefill suffix, single-pass on the decode prefix.

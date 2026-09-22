@@ -135,14 +135,14 @@ def test_compressor_uses_supported_kernel(modules, ppu, head, two_stage, expecte
         Any=object,
         CUDAGraphMode=types.SimpleNamespace(FULL="full"),
         torch=types.SimpleNamespace(uint8="u8", float8_e4m3fn="fp8"),
-        save_partial_states=kernel("save"),
+        _SAVE_PARTIAL_STATES_KERNEL=kernel("save"),
         compress_norm_rope_store_triton=kernel("triton"),
         compress_norm_rope_store_two_stage_triton=kernel("two_stage"),
     )
     if not ppu:
         modules(
             f"{base}.nvidia.ops.sparse_attn_compress_cutedsl",
-            compress_norm_rope_store_cutedsl=kernel("cute"),
+            _SPARSE_ATTN_COMPRESSOR_CUTEDSL_KERNEL=kernel("cute"),
         )
     load_patch("vllm_sail/patch/enhancement/models/deepseek_v4_compressor.py")
     obj = cls()
