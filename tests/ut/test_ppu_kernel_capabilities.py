@@ -331,6 +331,10 @@ def test_input_batch_reinitializes_when_only_context_length_changes(modules):
     runner = cls()
     runner.__dict__.update(
         max_model_len=8192,
+        cp_kv_cache_interleave_size=1,
+        jit_warmup_registry=types.SimpleNamespace(
+            activate=__import__("contextlib").nullcontext
+        ),
         max_encoder_len=0,
         _init_block_sizes=[],
         _init_kernel_block_sizes=[],
