@@ -169,3 +169,16 @@ def test_e2e_workflow_injects_compat_pin_and_privileged() -> None:
     assert "privileged: true" in text
     # smoke work is delegated to the checked-in script, not inlined in YAML.
     assert "scripts/ci/ppu_e2e_smoke.sh" in text
+
+
+def test_e2e_workflow_gives_every_cpu_runner_job_a_container() -> None:
+    text = WORKFLOW.read_text()
+    # k8s-runner-group-cpu-thead rejects container-less jobs ("Jobs without a
+    # job container are forbidden on this runner"), so every job on that runner
+    # must declare a container image.
+    runner_jobs = text.count("runs-on: k8s-runner-group-cpu-thead")
+    container_decls = sum(
+        1 for line in text.splitlines() if line.strip() == "container:"
+    )
+    assert runner_jobs >= 1
+    assert container_decls >= runner_jobs, (runner_jobs, container_decls)

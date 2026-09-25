@@ -78,6 +78,11 @@ jobs:
     needs: prepare
     runs-on: k8s-runner-group-cpu-thead
     timeout-minutes: 120
+    container:
+      # k8s-runner-group-cpu-thead forbids container-less jobs. This container
+      # only hosts checkout/download-artifact and the scheduler action, which
+      # then dispatches the real workload to a separate PPU pod.
+      image: ${{ inputs.image }}
     strategy:
       # Each model occupies PPU cards independently; keep going if one fails.
       fail-fast: false
