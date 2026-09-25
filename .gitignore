@@ -10,6 +10,9 @@ dist/
 htmlcov/
 vllm_sail/_version.py
 
+# Local and CI wheel build outputs.
+/artifacts/
+
 # Generated local tuning results; reviewed package configs are tracked separately.
 /benchmarks/kernels/fusedmoe_tuning_tools/*.json
 /benchmarks/kernels/fusedmoe_tuning_tools/*.csv

@@ -1,0 +1,99 @@
+name: Build PPU wheels
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_image:
+        description: Build container image
+        required: true
+        default: reg.docker.alibaba-inc.com/ai-tmp/llm:pytorch2.13.0-ubuntu24.04-cuda13.0-vllm0.27.0-py312-ppu202609111952
+        type: string
+      sdk_url:
+        description: SAIL SDK installer URL
+        required: true
+        default: https://art-pub.eng.t-head.cn/artifactory/apackage/daily/ppu.2v2_release/latest/PPU_SDK/ppu_1.0.0_Ubuntu2404_v13_release.run
+        type: string
+      torch_url:
+        description: SAIL PyTorch archive URL
+        required: true
+        default: https://art-pub.eng.t-head.cn/artifactory/apackage/daily/ppu.2v2_release/latest/PPU_SDK_PYPI/pytorch/ppu_sdk_hggcrt3-pytorch2.13.0-ubuntu2404-py312.tar.gz
+        type: string
+      vllm_ref:
+        description: vLLM branch, tag, or reachable commit
+        required: true
+        default: releases/v0.27.1
+        type: string
+      pytorch_sail_arch:
+        description: Semicolon-separated HG architectures
+        required: true
+        default: ppu_15;ppu_10
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-ppu-wheels-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build vLLM and vLLM SAIL wheels
+    runs-on: k8s-runner-group-cpu-thead
+    timeout-minutes: 180
+    container:
+      image: ${{ inputs.build_image }}
+    env:
+      SDK_URL: ${{ inputs.sdk_url }}
+      TORCH_URL: ${{ inputs.torch_url }}
+      VLLM_REF: ${{ inputs.vllm_ref }}
+      PYTORCH_SAIL_ARCH: ${{ inputs.pytorch_sail_arch }}
+      ARTIFACT_DIR: ${{ github.workspace }}/artifacts
+    steps:
+      - name: Disable internal GitHub mirror rewrite
+        shell: bash
+        run: |
+          # The self-hosted CPU runner image ships a global/system git
+          # url.<internal-mirror>.insteadOf = https://github.com rewrite. Left in
+          # place it makes actions/checkout fetch from the internal mirror and
+          # fail, so strip only the github.com rewrites before checkout.
+          for scope in system global; do
+            echo "=== ${scope} insteadOf before ==="
+            git config --${scope} --get-regexp '^url\..*\.insteadof$' 2>/dev/null || true
+            while IFS= read -r section; do
+              [ -n "${section}" ] || continue
+              git config --${scope} --unset-all "${section}.insteadOf" 2>/dev/null || true
+            done < <(git config --${scope} --get-regexp '^url\..*\.insteadof$' 2>/dev/null | awk '$2 ~ /github\.com/ {sub(/\.insteadof$/, "", $1); print $1}')
+          done
+          echo "=== insteadOf after (system) ==="
+          git config --system --get-regexp '^url\..*\.insteadof$' 2>/dev/null || echo none
+          echo "=== insteadOf after (global) ==="
+          git config --global --get-regexp '^url\..*\.insteadof$' 2>/dev/null || echo none
+
+      - name: Check out vLLM SAIL
+        uses: actions/checkout@v4
+        with:
+          github-server-url: https://github.com
+
+      - name: Build wheels
+        run: bash scripts/ci/build_ppu_wheels.sh
+
+      - name: Upload wheels
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ppu-wheels-${{ github.run_id }}
+          path: artifacts/wheels/**/*.whl
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ppu-build-diagnostics-${{ github.run_id }}
+          path: |
+            artifacts/logs/**
+            artifacts/build-manifest.txt
+          if-no-files-found: warn
+          retention-days: 14
