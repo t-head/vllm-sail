@@ -1,0 +1,138 @@
+name: E2E PPU smoke
+
+# End-to-end smoke test on real PPU cards. It reuses the wheels produced by a
+# "Build PPU wheels" run, serves a model from the auto-mounted NAS checkpoint,
+# and verifies one chat completion. PPU cards are scarce and the run is
+# expensive, so this workflow is manual only (no automatic triggers).
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: Run ID of a "Build PPU wheels" run whose ppu-wheels-<run_id> artifact holds the wheels under test
+        required: true
+        type: string
+      models:
+        description: Comma-separated catalog keys to run (blank = every model in scripts/ci/ppu_e2e_models.json)
+        required: false
+        default: qwen3.8-27b
+        type: string
+      image:
+        description: Runtime container image the PPU pod runs
+        required: true
+        default: reg.docker.alibaba-inc.com/ai-tmp/llm:pytorch2.13.0-ubuntu24.04-cuda13.0-vllm0.27.0-py312-ppu202609111952
+        type: string
+
+permissions:
+  contents: read
+  # Downloading an artifact produced by another run needs the actions:read scope.
+  actions: read
+
+concurrency:
+  group: e2e-ppu-${{ github.ref }}-${{ inputs.build_run_id }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Resolve model matrix
+    runs-on: k8s-runner-group-cpu-thead
+    timeout-minutes: 10
+    container:
+      # The runtime image ships py312; reuse it so the selector always has python3.
+      image: ${{ inputs.image }}
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+    steps:
+      - name: Disable internal GitHub mirror rewrite
+        shell: bash
+        run: |
+          # The self-hosted CPU runner image ships a global/system git
+          # url.<internal-mirror>.insteadOf = https://github.com rewrite. Left in
+          # place it makes actions/checkout fetch from the internal mirror and
+          # fail, so strip only the github.com rewrites before checkout.
+          for scope in system global; do
+            echo "=== ${scope} insteadOf before ==="
+            git config --${scope} --get-regexp '^url\..*\.insteadof$' 2>/dev/null || true
+            while IFS= read -r section; do
+              [ -n "${section}" ] || continue
+              git config --${scope} --unset-all "${section}.insteadOf" 2>/dev/null || true
+            done < <(git config --${scope} --get-regexp '^url\..*\.insteadof$' 2>/dev/null | awk '$2 ~ /github\.com/ {sub(/\.insteadof$/, "", $1); print $1}')
+          done
+
+      - name: Check out vLLM SAIL
+        uses: actions/checkout@v4
+        with:
+          github-server-url: https://github.com
+
+      - name: Select models
+        id: select
+        shell: bash
+        # Pass the caller-controlled input through the environment (never inline
+        # it into the command) so a crafted value cannot inject shell.
+        env:
+          MODELS: ${{ inputs.models }}
+        run: python3 scripts/ci/ppu_e2e_select.py "${MODELS}" >> "$GITHUB_OUTPUT"
+
+  e2e:
+    name: E2E ${{ matrix.model.key }}
+    needs: prepare
+    runs-on: k8s-runner-group-cpu-thead
+    timeout-minutes: 120
+    strategy:
+      # Each model occupies PPU cards independently; keep going if one fails.
+      fail-fast: false
+      matrix:
+        model: ${{ fromJson(needs.prepare.outputs.matrix).include }}
+    steps:
+      - name: Disable internal GitHub mirror rewrite
+        shell: bash
+        run: |
+          # See the prepare job: strip the github.com insteadOf rewrites so
+          # actions/checkout and download-artifact reach github.com directly.
+          for scope in system global; do
+            echo "=== ${scope} insteadOf before ==="
+            git config --${scope} --get-regexp '^url\..*\.insteadof$' 2>/dev/null || true
+            while IFS= read -r section; do
+              [ -n "${section}" ] || continue
+              git config --${scope} --unset-all "${section}.insteadOf" 2>/dev/null || true
+            done < <(git config --${scope} --get-regexp '^url\..*\.insteadof$' 2>/dev/null | awk '$2 ~ /github\.com/ {sub(/\.insteadof$/, "", $1); print $1}')
+          done
+
+      - name: Check out vLLM SAIL
+        uses: actions/checkout@v4
+        with:
+          github-server-url: https://github.com
+
+      - name: Download CI-built wheels
+        uses: actions/download-artifact@v4
+        with:
+          name: ppu-wheels-${{ inputs.build_run_id }}
+          path: wheels
+          run-id: ${{ inputs.build_run_id }}
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+
+      - name: Run PPU E2E smoke
+        uses: t-head/ppu-scheduler-action@main
+        with:
+          image: ${{ inputs.image }}
+          # Single node; nproc_per_node matches the tensor-parallel card count.
+          nnodes: 0
+          nproc_per_node: ${{ matrix.model.tp }}
+          namespace: ppu-sched
+          # The built wheels (arch ppu_15;ppu_10) are only verified on 810E.
+          node_selector: board-type=${{ matrix.model.board }}
+          timeout_minutes: 90
+          cleanup_policy: always
+          source_dir: /workspace/source
+          # Ship the checked-out repo plus the downloaded wheels into the pod.
+          artifact_paths: wheels/**
+          # VLLM_VERSION pins the release the SAIL compat gate accepts; the pod
+          # reads WHEELS_DIR from the staged source tree.
+          extra_env: MODEL_PATH=${{ matrix.model.checkpoint }},SERVED_NAME=${{ matrix.model.served_name }},TP_SIZE=${{ matrix.model.tp }},EXTRA_SERVE_FLAGS=${{ matrix.model.extra_serve_flags }},VLLM_VERSION=0.27.1,WHEELS_DIR=/workspace/source/wheels
+          container_options: |
+            privileged: true
+            host_ipc: true
+            host_network: true
+            shm_size: 32Gi
+          command: cd /workspace/source && bash scripts/ci/ppu_e2e_smoke.sh

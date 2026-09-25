@@ -1,0 +1,10 @@
+[
+  {
+    "key": "qwen3.8-27b",
+    "checkpoint": "/nas_aisw/datasets/checkpoints/LLM/Qwen/v3.8/Qwen3.8-27B",
+    "served_name": "qwen3.8-27b",
+    "board": "OAM-810E",
+    "tp": 2,
+    "extra_serve_flags": "--trust-remote-code"
+  }
+]
