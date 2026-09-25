@@ -99,12 +99,8 @@ def installed(monkeypatch, patch_utils_module):
 )
 def test_ppu10_query_bypasses_unsupported_fp8_kernel(installed, consumer):
     _, modules, calls, _ = installed
-    buffers = object()
-    assert (
-        modules[consumer].fused_indexer_q_rope_quant(*range(6), output_buffers=buffers)
-        == "int8_q"
-    )
-    assert calls[-1][2]["output_buffers"] is buffers
+    assert modules[consumer].fused_indexer_q_rope_quant(*range(6)) == "int8_q"
+    assert calls[-1][2] == {}
 
 
 @pytest.mark.parametrize(
@@ -120,11 +116,11 @@ def test_other_query_paths_delegate(installed, ppu, capability, use_fp4):
     platform.ppu, platform.capability = ppu, capability
     assert (
         modules[f"{BASE}.attention"].fused_indexer_q_rope_quant(
-            *range(6), use_fp4=use_fp4, output_buffers=None
+            *range(6), use_fp4=use_fp4
         )
         == "upstream_q"
     )
-    assert calls[-1][2] == {"use_fp4": use_fp4, "output_buffers": None}
+    assert calls[-1][2] == {"use_fp4": use_fp4}
 
 
 @pytest.mark.parametrize("consumer", [K_PROVIDER, f"{BASE}.compressor"])

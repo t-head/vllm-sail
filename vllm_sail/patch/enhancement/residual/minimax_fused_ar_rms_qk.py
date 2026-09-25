@@ -32,7 +32,7 @@ REASON = (
     "initialize. The fork disables the kernel module-wide; the pure-PyTorch "
     "allreduce + RMSNorm fallback is functionally equivalent."
 )
-AFFECTED_VERSIONS = ">=0.27.0,<0.28.0"
+AFFECTED_VERSIONS = ">=0.30.0,<0.31.0"
 REMOVE_WHEN = (
     "PPU's cuda.bindings/cudaMalloc stack accepts the Lamport workspace "
     "allocation (the upstream try/except in MiniMaxText01RMSNormTP.__init__ "

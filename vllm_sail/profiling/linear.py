@@ -47,7 +47,7 @@ patch(
     _linear.__name__,
     "ReplicatedLinear.forward",
     reason="Opt-in PPU profiling adds the fork's per-linear GEMM scopes.",
-    affected_versions=">=0.27.0,<0.28.0",
+    affected_versions=">=0.30.0,<0.31.0",
     remove_when="Upstream linear kernels expose equivalent profiling hooks.",
 )(bind_body(_ReplicatedLinear_forward, _linear))
 
@@ -97,7 +97,7 @@ patch(
     _linear.__name__,
     "ColumnParallelLinear.forward",
     reason="Opt-in PPU profiling adds the fork's per-linear GEMM scopes.",
-    affected_versions=">=0.27.0,<0.28.0",
+    affected_versions=">=0.30.0,<0.31.0",
     remove_when="Upstream linear kernels expose equivalent profiling hooks.",
 )(bind_body(_ColumnParallelLinear_forward, _linear))
 
@@ -154,6 +154,6 @@ patch(
     _linear.__name__,
     "RowParallelLinear.forward",
     reason="Opt-in PPU profiling adds the fork's per-linear GEMM scopes.",
-    affected_versions=">=0.27.0,<0.28.0",
+    affected_versions=">=0.30.0,<0.31.0",
     remove_when="Upstream linear kernels expose equivalent profiling hooks.",
 )(bind_body(_RowParallelLinear_forward, _linear))

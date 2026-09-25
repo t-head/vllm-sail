@@ -14,7 +14,7 @@ from vllm_sail.patch.utils import PATCH_MARKER, patch
 
 _META = dict(
     reason="PPU GDN uses PLA for supported decode/prefill layouts and Triton for other shapes.",
-    affected_versions=">=0.27.0,<0.28.0",
+    affected_versions=">=0.30.0,<0.31.0",
     remove_when="GDN exposes platform backend registration for PLA prefill and recurrent kernels.",
 )
 
@@ -33,6 +33,7 @@ def fused_recurrent_gated_delta_rule_packed_decode(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # PPU MODIFICATION: begin
     from vllm_sail.attention.pla_decode import get_sail_cuda_pla_k_last_packed
+
     # PPU MODIFICATION: end
     if mixed_qkv.ndim != 2:
         raise ValueError(
@@ -132,7 +133,9 @@ def fused_recurrent_gated_delta_rule_packed_decode(
     stride_indices_seq = ssm_state_indices.stride(0)
 
     NV = triton.cdiv(V, BV)
-    grid = (NV, B * HV)
+    # CUDA limits grid Y/Z dimensions to 65535.
+    split_batch_head_grid = B * HV > 65535
+    grid = (NV, HV, B) if split_batch_head_grid else (NV, B * HV)
     # PPU MODIFICATION: begin
 
     # PPU SAIL CUDA PLA fast path (VLLM_SAIL_USE_PLA); see sail_cuda_pla.py
@@ -164,7 +167,7 @@ def fused_recurrent_gated_delta_rule_packed_decode(
             torch.arange(B + 1, device=a.device, dtype=torch.int32),
             False,  # is_kda
             False,  # is_sglang: vLLM reserves slot 0 (NULL_BLOCK_ID), unlike
-                   # sglang whose PAD_SLOT_ID is -1 with slot 0 a valid row.
+            # sglang whose PAD_SLOT_ID is -1 with slot 0 a valid row.
         )
         return out, initial_state
 
@@ -194,6 +197,7 @@ def fused_recurrent_gated_delta_rule_packed_decode(
         BV=BV,
         SOFTPLUS_THRESHOLD=20.0,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
+        SPLIT_BATCH_HEAD_GRID=split_batch_head_grid,
         num_warps=num_warps,
         num_stages=num_stages,
     )
@@ -256,6 +260,7 @@ def fused_sigmoid_gating_delta_rule_update(
     """
     # PPU MODIFICATION: begin
     from vllm_sail.attention.pla_decode import get_sail_cuda_pla_k_last
+
     # PPU MODIFICATION: end
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
@@ -301,7 +306,12 @@ def fused_sigmoid_gating_delta_rule_update(
         and initial_state.dtype == torch.float32
         and ssm_state_indices is not None
         and ssm_state_indices.dtype == torch.int32
-        and (not is_spec or (ssm_state_indices.ndim == 2 and num_accepted_tokens.dtype == torch.int32))
+        and (
+            not is_spec
+            or (
+                ssm_state_indices.ndim == 2 and num_accepted_tokens.dtype == torch.int32
+            )
+        )
         and (cu_seqlens is None or cu_seqlens.dtype == torch.int32)
         and N > 0
         and K == 128
@@ -324,17 +334,17 @@ def fused_sigmoid_gating_delta_rule_update(
             cu_seqlens,
             is_kda,
             is_spec,  # disable_state_update: True for spec decode (per-timestep
-                       # writes to 2D slots already cover all state updates; skip
-                       # redundant final write-back), False for non-spec decode
-                       # (fast decode path writes state directly).
+            # writes to 2D slots already cover all state updates; skip
+            # redundant final write-back), False for non-spec decode
+            # (fast decode path writes state directly).
             None,  # intermediate_states_buffer (vLLM uses main state pool)
             None,  # intermediate_state_indices
             num_accepted_tokens,  # cache_steps_or_num_accept: None for non-spec
-                                   # (no accepted tokens), tensor for spec decode
+            # (no accepted tokens), tensor for spec decode
             None,  # retrieve_parent_token (vLLM does not use eagle tree)
             None,  # lower_bound (KDA-only)
             False,  # is_sglang: vLLM reserves slot 0 (NULL_BLOCK_ID), unlike
-                   # sglang whose PAD_SLOT_ID is -1 with slot 0 a valid row.
+            # sglang whose PAD_SLOT_ID is -1 with slot 0 a valid row.
         )
         return o_cuda, initial_state
     # PPU MODIFICATION: end
@@ -443,6 +453,7 @@ def _pla_prefill_supported(vllm_config: VllmConfig) -> bool:
         get_sail_cuda_pla_prefill_fwd,
         get_sail_cuda_pla_prefill_head_configs,
     )
+
     # PPU MODIFICATION: end
     if get_sail_cuda_pla_prefill_fwd() is None:
         return False
@@ -480,17 +491,18 @@ _pla_prefill_supported = patch(
 
 def _resolve_gdn_prefill_backend(
     vllm_config: VllmConfig,
-# PPU MODIFICATION: begin
+    # PPU MODIFICATION: begin
 ) -> tuple[str, Literal["triton", "flashinfer", "cutedsl", "pla"]]:
-# PPU MODIFICATION: end
+    # PPU MODIFICATION: end
     """Resolve GDN prefill backend.
 
     FlashInfer's GDN prefill kernel is chosen when:
     * ``requested in ["flashinfer", "auto"]``;
     * ``platform == cuda``;
     * one of the following:
-      - Hopper (SM90) — no further constraints;
-      - Blackwell (SM10.x) with ``head_k_dim == 128``, ``cuda_runtime >= 13``.
+      - Hopper (SM90) - no further constraints;
+      - Blackwell (SM10.x) with ``head_k_dim == 128``, ``cuda_runtime >= 13``;
+      - Blackwell (SM12.x) with ``head_k_dim == 128``, ``cuda_runtime >= 13``.
 
     In-tree CuteDSL GDN prefill kernel is chosen when:
     * "cutedsl" is requested; (opt-in only)
@@ -539,6 +551,13 @@ def _resolve_gdn_prefill_backend(
     ):
         supports_flashinfer = True
         supports_cutedsl = True
+    elif (
+        current_platform.is_device_capability_family(120)
+        and head_k_dim == 128
+        and current_platform.get_cuda_runtime_major() >= 13
+    ):
+        # The in-tree CuteDSL kernel targets SM100 only, so it stays off here.
+        supports_flashinfer = True
 
     if backend in ["flashinfer", "auto"] and supports_flashinfer:
         return backend, "flashinfer"
@@ -569,6 +588,15 @@ def _log_gdn_backend_decision(
     head_k_dim = getattr(
         vllm_config.model_config.hf_text_config, "linear_key_head_dim", None
     )
+
+    if current_platform.is_cpu():
+        logger.info_once(
+            "Using %s GDN prefill kernel (head_k_dim=%s).",
+            "CPU",
+            head_k_dim,
+        )
+        return
+
     chosen = {
         "flashinfer": "FlashInfer",
         "cutedsl": "CuteDSL",
@@ -621,6 +649,7 @@ def forward_pla(
 ):
     # PPU MODIFICATION: begin
     from vllm_sail.attention.pla_prefill import get_sail_cuda_pla_prefill_fwd
+
     # PPU MODIFICATION: end
     assert not use_qk_l2norm_in_kernel, (
         "The pla prefill backend expects l2-normalized q/k; run "
@@ -688,10 +717,8 @@ def __init__(self) -> None:
     self.gdn_prefill_backend = active_backend
 
     # PPU MODIFICATION: begin
-    if backend in ("flashinfer", "cutedsl", "pla") and (
-        active_backend != backend
-    ):
-    # PPU MODIFICATION: end
+    if backend in ("flashinfer", "cutedsl", "pla") and (active_backend != backend):
+        # PPU MODIFICATION: end
         logger.warning_once(
             "GDN prefill backend '%s' is selected but cannot use this "
             "kernel on the current platform. Falling back to Triton/FLA.",

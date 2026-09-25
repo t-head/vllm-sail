@@ -76,7 +76,7 @@ root. The SAIL SDK's optional `model_prof` package adds iteration hooks.
 
 Release installations should report their version directly. If a source build
 has ambiguous version metadata, `VLLM_VERSION` can state its actual upstream
-release base. For example, use `VLLM_VERSION=0.27.1` only for a checkout verified
+release base. For example, use `VLLM_VERSION=0.30.0` only for a checkout verified
 to be based on that release. This override changes the version check; it does
 not make an incompatible checkout supported.
 

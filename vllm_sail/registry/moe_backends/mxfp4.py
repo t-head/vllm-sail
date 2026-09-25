@@ -16,7 +16,7 @@ from vllm_sail.patch.utils import patch
 from vllm_sail.registry.moe_backends._extend import extend_enum
 
 _MODULE = "vllm.model_executor.layers.fused_moe.oracle.mxfp4"
-_AFFECTED = ">=0.27.0,<0.28.0"
+_AFFECTED = ">=0.30.0,<0.31.0"
 _REMOVE_WHEN = (
     "upstream gains a register_moe_backend() extension point mirroring "
     "register_linear_kernel(), which would delete this patch."
@@ -180,6 +180,7 @@ def select_mxfp4_moe_backend(
 
     Note: Shape-specific fallbacks may still occur at runtime.
     """
+    runner_backend = config.moe_backend
     requested_activation_key = _resolve_activation_key(activation_key)
 
     activation_format = (
@@ -188,9 +189,10 @@ def select_mxfp4_moe_backend(
         else mk.FusedMoEActivationFormat.Standard
     )
 
-    runner_backend = config.moe_backend
     if runner_backend != "auto":
-        requested_backends = map_mxfp4_backend(runner_backend)
+        requested_backends = _get_requested_backends(
+            runner_backend, requested_activation_key
+        )
         if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
             # PPU MODIFICATION: begin
             _batched_backend_map = {
@@ -208,21 +210,20 @@ def select_mxfp4_moe_backend(
             # PPU MODIFICATION: end
             requested_backends = [
                 # PPU MODIFICATION: begin
-                _batched_backend_map.get(b, b) for b in requested_backends
+                _batched_backend_map.get(b, b)
+                for b in requested_backends
                 # PPU MODIFICATION: end
             ]
-        candidates = _filter_by_activation(requested_backends, requested_activation_key)
-        if not candidates:
+        if not requested_backends:
             raise ValueError(
                 f"moe_backend={runner_backend!r} does not support "
-                f"activation={requested_activation_key}; supported variants: "
-                f"{[b.name for b in requested_backends]}"
+                f"activation={requested_activation_key}"
             )
         last_error: Exception | None = None
-        for requested_backend in candidates:
+        for requested_backend in requested_backends:
             act_key = (
                 requested_activation_key
-                if requested_activation_key is not None
+                if requested_backend == Mxfp4MoeBackend.EMULATION
                 else _backend_activation_key(requested_backend)
             )
             try:
@@ -237,6 +238,21 @@ def select_mxfp4_moe_backend(
                 last_error = e
         assert last_error is not None
         raise last_error
+
+    if _requires_qwen38_tep8_emulation(config, requested_activation_key):
+        backend = Mxfp4MoeBackend.EMULATION
+        logger.warning_once(
+            "Using OCP MX emulation for the Qwen3.8 Flash Next TEP8 routed "
+            "experts on gfx950 because the native AITER W4A4 kernel is not "
+            "numerically reliable for this shape. Performance will be lower."
+        )
+        return _return_or_raise(
+            backend,
+            config,
+            kMxfp4Static,
+            requested_activation_key,
+            activation_format,
+        )
 
     # Select kernels in order of backend.
     AVAILABLE_BACKENDS = _filter_by_activation(
@@ -273,17 +289,6 @@ def select_mxfp4_moe_backend(
             activation_format,
         )
 
-    if current_platform.is_cpu():
-        backend = Mxfp4MoeBackend.CPU
-        logger.info_once(_make_log_backend(backend))
-        return _return_or_raise(
-            Mxfp4MoeBackend.CPU,
-            config,
-            kMxfp4Static,
-            None,
-            activation_format,
-        )
-
     unsupported_log = "; ".join(
         [
             f"backend: {backend.value}, reason: {reason}"
@@ -306,3 +311,27 @@ select_mxfp4_moe_backend = patch(
     affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )(bind_body(select_mxfp4_moe_backend, oracle))
+
+
+_upstream_select_deepseek_v4 = oracle.select_deepseek_v4_mxfp4_moe_backend
+
+
+@patch(
+    _MODULE,
+    "select_deepseek_v4_mxfp4_moe_backend",
+    reason="Preserve PPU W4A4/W4A16 selection through the 0.30 MXFP4 kernel factory.",
+    affected_versions=_AFFECTED,
+    remove_when=_REMOVE_WHEN,
+)
+def select_deepseek_v4_mxfp4_moe_backend(config):
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_ppu():
+        return _upstream_select_deepseek_v4(config)
+    activation_key = None
+    if not current_platform.is_device_capability((8, 0)) and config.moe_backend not in (
+        "marlin",
+        "ppu_deep_gemm_w4a16",
+    ):
+        activation_key = oracle.kMxfp4Dynamic
+    return oracle.select_mxfp4_moe_backend(config, activation_key=activation_key)

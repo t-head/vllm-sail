@@ -138,7 +138,7 @@ def _assert_ulp(torch, actual, expected, max_ulp=1):
     assert distance <= max_ulp, f"maximum storage ULP distance: {distance}"
 
 
-@pytest.mark.parametrize("mode", ["packed", "packed_out", "bf16", "fp8"])
+@pytest.mark.parametrize("mode", ["packed", "packed_no_qnorm", "bf16", "fp8"])
 @pytest.mark.parametrize("tokens", [1, 17, 1025])
 def test_qnorm_rope_cache_insert(runtime, mode, tokens):
     torch = runtime
@@ -166,7 +166,9 @@ def test_qnorm_rope_cache_insert(runtime, mode, tokens):
     block_ids, offsets = slots[valid] // block_size, slots[valid] % block_size
     q_float = q.float()
     q_norm = q_float * torch.rsqrt(q_float.square().mean(-1, keepdim=True) + eps)
-    q_ref = _rope(torch, q_norm, positions, rope_cache)
+    q_ref = _rope(
+        torch, q_float if mode == "packed_no_qnorm" else q_norm, positions, rope_cache
+    )
     kv_ref = _rope(torch, kv, positions, rope_cache)
 
     if mode.startswith("packed"):
@@ -175,17 +177,9 @@ def test_qnorm_rope_cache_insert(runtime, mode, tokens):
         )
         expected = cache.clone()
         args = (cache, slots, positions, rope_cache, padded_heads, eps, block_size)
-        if mode == "packed":
-            output = torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
-                q, kv, *args
-            )
-        else:
-            output = torch.empty(
-                tokens, padded_heads, 512, device="cuda", dtype=q.dtype
-            )
-            torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert_out(
-                q, kv, output, *args
-            )
+        output = torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
+            q, kv, *args, apply_q_norm=mode != "packed_no_qnorm"
+        )
         torch.cuda.synchronize()
         _assert_ulp(torch, output[:, :heads], q_ref.to(q.dtype))
         assert bool((output[:, heads:] == 0).all())

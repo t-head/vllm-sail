@@ -9,8 +9,7 @@ the in-tree fork these sat *inside* vLLM's own package, so upstream's loaders
 found them by resolving ``configs/`` relative to their own ``__file__``:
 
 * ``fused_moe/fused_moe.py`` -> ``os.path.dirname(realpath(__file__)) / "configs"``
-* ``quantization/utils/int8_utils.py`` and ``fp8_utils.py`` -> same, for
-  ``utils/configs``
+* ``quantization/utils/fp8_utils.py`` -> same, for ``utils/configs``
 
 Ported into ``vllm_sail/``, those files are outside every directory upstream looks
 in, so **every config silently misses** and the kernels fall back to untuned
@@ -25,9 +24,10 @@ folder *before* its own (``fused_moe.py``: ``envs.VLLM_TUNED_CONFIG_FOLDER``), s
 we point that at our directory when the user has not set it themselves. A user
 value always wins -- we only fill in a default.
 
-**Block-quant configs** have no such hook, so ``get_w8a8_block_int8_configs`` and
-its fp8 counterpart are patched to search the plugin directory as well. Those
-patches live in ``vllm_sail/patch/enhancement/tuned_config_lookup.py``.
+**FP8 block-quant configs** have no such hook, so ``get_w8a8_block_fp8_configs``
+is patched to search the plugin directory as well. The patch lives in
+``vllm_sail/patch/enhancement/tuned_config_lookup.py``. vLLM 0.30 removed its
+unused INT8 block-quant loader; SAIL's ACEXT INT8 path is independent of it.
 """
 
 from __future__ import annotations

@@ -54,7 +54,9 @@ def test_rebased_indexer_init_calls_parent_once(
         ],
         type_ignores=[],
     )
-    namespace = {"types": types, "_indexer_module": target}
+    from vllm_sail.patch.bodies import bind_body
+
+    namespace = {"bind_body": bind_body, "_indexer_module": target}
     exec(compile(selected, str(PATCH_PATH), "exec"), namespace)
     replacement = namespace["_with_target_globals"](namespace["_builder_init_body"])
     patch_utils_module.patch(

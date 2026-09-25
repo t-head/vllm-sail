@@ -30,7 +30,7 @@ from vllm.v1.attention.ops.triton_decode_attention import (
 
 from vllm_sail.patch.utils import patch
 
-_AFFECTED = ">=0.27.0,<0.28.0"
+_AFFECTED = ">=0.30.0,<0.31.0"
 _MODULE = "vllm.v1.attention.ops.triton_decode_attention"
 
 

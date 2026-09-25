@@ -48,10 +48,14 @@ def __getattr__(name: str):
 
 
 def is_fa_version_supported(fa_version: int, device=None) -> bool:
+    if fa_version == 4:
+        return False
     return _kernels().is_fa_version_supported(fa_version, device)
 
 
 def fa_version_unsupported_reason(fa_version: int, device=None) -> str | None:
+    if fa_version == 4:
+        return "SAIL provides FlashAttention 2 and 3; FA4 requires NVIDIA CuteDSL."
     return _kernels().fa_version_unsupported_reason(fa_version, device)
 
 

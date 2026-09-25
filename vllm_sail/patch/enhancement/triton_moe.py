@@ -18,7 +18,7 @@ from vllm_sail.patch.utils import patch
 
 _META = dict(
     reason="PPU tuned configurations require per-projection launch parameters, VALU and PPU Triton kernels.",
-    affected_versions=">=0.27.0,<0.28.0",
+    affected_versions=">=0.30.0,<0.31.0",
     remove_when="Upstream supports registration of the complete Triton MoE launch strategy.",
 )
 
@@ -129,6 +129,12 @@ def invoke_fused_moe_triton_kernel(
             BLOCK_SIZE_K,
         )
         use_td = False
+
+    # Triton treats 0-D tensor arguments as scalar values, but the kernel
+    # loads tensor-wise activation scales through a pointer.
+    if A_scale is not None and A_scale.ndim == 0:
+        A_scale = A_scale.reshape(1)
+
     # PPU MODIFICATION: begin
 
     # `tl.aiu_load` below is a PPU Triton-fork builtin, so the block-ptr path it
@@ -311,7 +317,7 @@ def dispatch_fused_moe_kernel(
     block_shape: list[int] | None = None,
     B_bias: torch.Tensor | None = None,
     # PPU MODIFICATION: begin
-    use_valu: bool | None = None
+    use_valu: bool | None = None,
     # PPU MODIFICATION: end
 ) -> None:
     assert topk_weights is not None or not mul_routed_weight
@@ -685,6 +691,7 @@ def fused_experts_impl(
 
     # PPU MODIFICATION: begin
     from vllm.model_executor.layers.fused_moe.config import _get_config_dtype_str
+
     # PPU MODIFICATION: end
     config_dtype = _get_config_dtype_str(
         use_fp8_w8a8=use_fp8_w8a8,
@@ -791,7 +798,7 @@ def fused_experts_impl(
         block_shape=block_shape,
         B_bias=w1_bias,
         # PPU MODIFICATION: begin
-        use_valu=config.get("USE_VALU", False)
+        use_valu=config.get("USE_VALU", False),
         # PPU MODIFICATION: end
     )
 
@@ -835,7 +842,7 @@ def fused_experts_impl(
         block_shape=block_shape,
         B_bias=w2_bias,
         # PPU MODIFICATION: begin
-        use_valu=config.get("USE_VALU", False)
+        use_valu=config.get("USE_VALU", False),
         # PPU MODIFICATION: end
     )
 
@@ -993,6 +1000,7 @@ def apply(
         torch.bfloat16,
         torch.float8_e4m3fn,
         torch.float8_e4m3fnuz,
+        torch.int8,
     ]
 
     # We declared expects_unquantized_inputs (LoRA + DP/EP all2all), so the
@@ -1039,6 +1047,7 @@ def apply(
     elif (
         hidden_states.dtype == torch.float8_e4m3fn
         or hidden_states.dtype == torch.float8_e4m3fnuz
+        or hidden_states.dtype == torch.int8
     ):
         compute_type = tl.bfloat16
     else:
@@ -1052,18 +1061,18 @@ def apply(
     )
     intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
 
-    sorted_token_ids, expert_ids, num_tokens_post_padded = (
-        _prepare_expert_assignment(
-            topk_ids,
-            config,
-            num_tokens,
-            top_k_num,
-            global_num_experts,
-            expert_map,
-            use_int8_w8a16=self.quant_config.use_int8_w8a16,
-            use_int4_w4a16=self.quant_config.use_int4_w4a16,
-            block_shape=self.block_shape,
-        )
+    # Include fused shared-expert rows while preserving EP remapping.
+    num_align_experts = w1.shape[0] if expert_map is None else global_num_experts
+    sorted_token_ids, expert_ids, num_tokens_post_padded = _prepare_expert_assignment(
+        topk_ids,
+        config,
+        num_tokens,
+        top_k_num,
+        num_align_experts,
+        expert_map,
+        use_int8_w8a16=self.quant_config.use_int8_w8a16,
+        use_int4_w4a16=self.quant_config.use_int4_w4a16,
+        block_shape=self.block_shape,
     )
 
     # LoRA w13: applied to intermediate_cache1 before activation. When

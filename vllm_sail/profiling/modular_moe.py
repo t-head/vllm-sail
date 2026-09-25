@@ -15,7 +15,7 @@ _original = _modular.FusedMoEKernelModularImpl.apply
     _modular.__name__,
     "FusedMoEKernelModularImpl.apply",
     reason="Opt-in PPU profiling includes modular MoE dispatch.",
-    affected_versions=">=0.27.0,<0.28.0",
+    affected_versions=">=0.30.0,<0.31.0",
     remove_when="Upstream exposes equivalent per-dispatch MoE tracing.",
 )
 @functools.wraps(_original)

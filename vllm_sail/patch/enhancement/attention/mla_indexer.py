@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+# ruff: noqa: F821
+# Copied bodies resolve globals in their upstream module through bind_body.
 """PPU patches for ``vllm.v1.attention.backends.mla.indexer`` (DSA indexer).
 
 The fork's changes, translated to plugin patches:
@@ -33,36 +35,20 @@ installation so every free name resolves exactly as it does upstream.
 
 from __future__ import annotations
 
-import types
-
 import torch
 from vllm.v1.attention.backends.mla import indexer as _indexer_module
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadataBuilder
 
 import vllm_sail.utils.deep_gemm as _ppu_deep_gemm
+from vllm_sail.patch.bodies import bind_body
 from vllm_sail.patch.utils import patch, patch_value
 
-_AFFECTED = ">=0.27.0,<0.28.0"
+_AFFECTED = ">=0.30.0,<0.31.0"
 _MODULE = "vllm.v1.attention.backends.mla.indexer"
 
 
 def _with_target_globals(fn):
-    """Return ``fn`` with its globals rebased onto the patched target module.
-
-    A verbatim upstream body references the target module's globals (``torch``,
-    ``envs``, ``current_platform``, private helpers, ...). A function defined
-    here would instead resolve them against this patch module; rebasing keeps
-    the body byte-faithful and makes it see the names this file rebinds on the
-    target module (``get_paged_mqa_logits_metadata``,
-    ``split_indexer_prefill_chunks``, ...).
-    """
-    return types.FunctionType(
-        fn.__code__,
-        _indexer_module.__dict__,
-        fn.__name__,
-        fn.__defaults__,
-        fn.__closure__,
-    )
+    return bind_body(fn, _indexer_module)
 
 
 patch_value(
@@ -96,6 +82,25 @@ patch_value(
 # the plugin's wrapper re-exports the very same has_deep_gemm object upstream
 # already binds, so that half of the switch is an identity. The patched build()
 # below resolves the rebound name through module globals at call time.
+_upstream_paged_metadata = _indexer_module.get_paged_mqa_logits_metadata
+
+
+def _ppu_paged_metadata(
+    context_lens, block_size, num_sms, metadata_extra=None, indices=None
+):
+    from vllm.platforms import current_platform
+
+    if current_platform.is_ppu():
+        if indices is not None:
+            raise NotImplementedError(
+                "SAIL DeepGEMM uses fixed-length indexer metadata"
+            )
+        return _ppu_deep_gemm.get_paged_mqa_logits_metadata(
+            context_lens, block_size, num_sms, metadata_extra
+        )
+    return _upstream_paged_metadata(context_lens, block_size, num_sms, indices=indices)
+
+
 patch(
     _MODULE,
     "get_paged_mqa_logits_metadata",
@@ -109,12 +114,12 @@ patch(
         "vllm.utils.deep_gemm dispatches on current_platform internally, or "
         "upstream accepts a DeepGEMM backend registry."
     ),
-)(_ppu_deep_gemm.get_paged_mqa_logits_metadata)
+)(_ppu_paged_metadata)
 
 
 def _split_indexer_prefill_chunks_body(
-    seq_lens_cpu: torch.Tensor,
-    query_lens_cpu: torch.Tensor,
+    compressed_seq_lens_cpu: torch.Tensor,
+    prefill_query_lens_cpu: torch.Tensor,
     workspace_size: int,
     max_logits_bytes: int,
     request_offset: int = 0,
@@ -122,9 +127,9 @@ def _split_indexer_prefill_chunks_body(
     logits_dtype: torch.dtype = torch.float32,
     # PPU MODIFICATION: end
 ) -> list[tuple[slice, slice]]:
-    """
-    Split prefill requests into chunks for the sparse indexer, respecting:
-    - N constraint: total_seq_lens <= workspace_size (existing O(N) workspace)
+    """Split this step's prefill requests into chunks, respecting:
+    - N constraint: total_seq_lens <= workspace_size (existing O(N)
+      workspace)
     - Logits constraint: M * N * 4 <= max_logits_bytes
 
     When a single request-level chunk still exceeds the logits budget,
@@ -133,7 +138,7 @@ def _split_indexer_prefill_chunks_body(
     Returns list of (req_slice, query_slice) tuples.
     """
     chunks: list[tuple[slice, slice]] = []
-    n = len(seq_lens_cpu)
+    n = len(compressed_seq_lens_cpu)
     # PPU MODIFICATION: begin
     bytes_per_elem = torch.empty((), dtype=logits_dtype).element_size()
     max_logits_elems = max(1, max_logits_bytes // bytes_per_elem)
@@ -144,7 +149,10 @@ def _split_indexer_prefill_chunks_body(
         start, chunk_m, chunk_n = end, 0, 0
 
         while end < n:
-            q, s = query_lens_cpu[end].item(), seq_lens_cpu[end].item()
+            q, s = (
+                prefill_query_lens_cpu[end].item(),
+                compressed_seq_lens_cpu[end].item(),
+            )
             new_m, new_n = chunk_m + q, chunk_n + s
             if new_n <= workspace_size and new_m * new_n <= max_logits_elems:
                 chunk_m, chunk_n = new_m, new_n
@@ -155,7 +163,10 @@ def _split_indexer_prefill_chunks_body(
         # A single request can exceed the budget, requiring sub-chunking
         # on the query dimension.
         if end == start:
-            chunk_m, chunk_n = query_lens_cpu[end].item(), seq_lens_cpu[end].item()
+            chunk_m, chunk_n = (
+                prefill_query_lens_cpu[end].item(),
+                compressed_seq_lens_cpu[end].item(),
+            )
             end += 1
 
         req_slice = slice(start + request_offset, end + request_offset)
@@ -169,7 +180,7 @@ def _split_indexer_prefill_chunks_body(
 
 patch(
     _MODULE,
-    "split_indexer_prefill_chunks",
+    "DeepseekV32IndexerMetadataBuilder._split_indexer_prefill_chunks",
     reason=(
         "Fork adds a logits_dtype parameter so the fp4 indexer cache (bf16 "
         "logits) chunks against the correct logits budget. UNCONDITIONAL in the "
@@ -179,6 +190,50 @@ patch(
     affected_versions=_AFFECTED,
     remove_when="upstream adds the logits_dtype parameter itself.",
 )(_with_target_globals(_split_indexer_prefill_chunks_body))
+
+
+_upstream_uses_fp4 = _indexer_module.dsa_indexer_uses_fp4
+
+
+@patch(
+    _MODULE,
+    "dsa_indexer_uses_fp4",
+    reason="PPU MXFP4 indexer support is supplied by SAIL DeepGEMM, not CUDA SM100.",
+    affected_versions=_AFFECTED,
+    remove_when="The indexer exposes a platform capability hook.",
+)
+def dsa_indexer_uses_fp4(vllm_config):
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_ppu():
+        return _upstream_uses_fp4(vllm_config)
+    kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype("fp8")
+    if kv_dtype not in _indexer_module.DSA_INDEXER_KV_DTYPES:
+        raise ValueError(f"Unsupported PPU indexer_kv_dtype={kv_dtype!r}")
+    if kv_dtype == "mxfp4" and not current_platform.is_device_capability(89):
+        raise ValueError("PPU indexer_kv_dtype='mxfp4' requires capability sm_89")
+    return kv_dtype == "mxfp4"
+
+
+# Model modules can capture the capability helper before general plugins load.
+import sys
+
+for _consumer_name in (
+    "vllm.model_executor.models.deepseek_v2",
+    "vllm.models.deepseek_v4.attention",
+):
+    _consumer = sys.modules.get(_consumer_name)
+    if (
+        _consumer is not None
+        and getattr(_consumer, "dsa_indexer_uses_fp4", None) is _upstream_uses_fp4
+    ):
+        patch(
+            _consumer_name,
+            "dsa_indexer_uses_fp4",
+            reason="Preloaded indexer consumers must use SAIL's MXFP4 capability.",
+            affected_versions=_AFFECTED,
+            remove_when="Consumers resolve the helper through its provider module.",
+        )(dsa_indexer_uses_fp4)
 
 
 def _builder_init_body(self, *args, block_table_width: int, **kwargs) -> None:
@@ -194,15 +249,6 @@ def _builder_init_body(self, *args, block_table_width: int, **kwargs) -> None:
     self.pcp_world_size = parallel_config.prefill_context_parallel_size
     self.use_pcp = self.pcp_world_size > 1
     self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
-    # The DCP sparse-indexer code is parameterized by interleave size, but
-    # interleave > 1 is not yet validated end-to-end (gsm8k parity fails),
-    # so fail closed here rather than silently produce wrong output.
-    if self.dcp_world_size > 1 and self.cp_kv_cache_interleave_size > 1:
-        raise NotImplementedError(
-            "DCP sparse indexer currently supports only "
-            f"cp_kv_cache_interleave_size=1 (got "
-            f"{self.cp_kv_cache_interleave_size})."
-        )
     # NOTE(Chen):an estimated max size of flattened_kv. Need to double check.
     self.max_prefill_buffer_size = get_max_prefill_buffer_size(self.vllm_config)
     self.num_speculative_tokens = (
@@ -210,56 +256,33 @@ def _builder_init_body(self, *args, block_table_width: int, **kwargs) -> None:
         if self.vllm_config.speculative_config
         else 0
     )
-    self.use_fp4_indexer_cache = (
-        self.vllm_config.attention_config.use_fp4_indexer_cache
-    )
-
+    self.indexer_uses_fp4 = dsa_indexer_uses_fp4(self.vllm_config)
     # PPU MODIFICATION: begin
-    if self.use_fp4_indexer_cache and current_platform.is_ppu():
-        self.indexer_n_head = self.kv_cache_spec.indexer_n_head
-        self.indexer_q_head_dim = self.kv_cache_spec.indexer_q_head_dim
-    else:
-        self.indexer_n_head = 0
-        self.indexer_q_head_dim = 0
-
-    # NOTE(kai): ppu fp4 indexer cache requires sm_89
-    if current_platform.is_ppu():
-        assert (
-            current_platform.is_device_capability(89)
-            or not self.use_fp4_indexer_cache
-        ), (
-            "use_fp4_indexer_cache requires PPUs "
-            "sm_89 and "
-            "earlier architectures are not supported."
-        )
-    else:
-        assert (
-            current_platform.is_device_capability_family(100)
-            or not self.use_fp4_indexer_cache
-        ), (
-            "use_fp4_indexer_cache requires Blackwell datacenter GPUs "
-            "(sm_10x, e.g. B200/GB200); sm_120 (consumer Blackwell) and "
-            "earlier architectures are not supported."
-        )
+    self.indexer_n_head = (
+        self.kv_cache_spec.indexer_n_head or 0 if self.indexer_uses_fp4 else 0
+    )
+    self.indexer_q_head_dim = (
+        self.kv_cache_spec.indexer_q_head_dim or 0 if self.indexer_uses_fp4 else 0
+    )
     # PPU MODIFICATION: end
 
     next_n = self.num_speculative_tokens + 1
     self.decode_threshold = next_n
     self.reorder_batch_threshold = None
-    # NOTE: SM100 datacenter GPUs support any next_n natively via the
-    # multi-atom paged MQA logits kernels (FP8 and FP4 indexer
-    # caches). Outside the SM100 family the FP8
-    # paged MQA logits kernel only supports next_n in (1, 2)
-    # (deepgemm smxx_fp8_fp4_paged_mqa_logits.hpp:233), so flatten there.
-    self.use_flattening = not current_platform.is_device_capability_family(
-        100
-    ) and next_n not in (1, 2)
+    self.use_flattening = _use_flattening(self.vllm_config)
+    # PPU MODIFICATION: begin
+    # SAIL's paged logits API uses the existing fixed-length metadata layout.
+    self.supports_varlen = (
+        False if current_platform.is_ppu() else _supports_varlen_paged_mqa_logits()
+    )
+    # PPU MODIFICATION: end
     logger.info_once(
-        "DSA indexer decode path: use_flattening=%s "
-        "(next_n=%d, use_fp4_indexer_cache=%s)",
+        "DSA indexer decode path: use_flattening=%s supports_varlen=%s "
+        "(next_n=%d, use_fp4_cache=%s)",
         self.use_flattening,
+        self.supports_varlen,
         next_n,
-        self.use_fp4_indexer_cache,
+        self.indexer_uses_fp4,
     )
 
     # PPU MODIFICATION: begin
@@ -272,10 +295,13 @@ def _builder_init_body(self, *args, block_table_width: int, **kwargs) -> None:
     # PPU MODIFICATION: end
     self.num_sms = sm_count
 
-    self.offsets_buffer = torch.arange(
-        next_n, device=self.device, dtype=torch.int32
-    )
+    self.offsets_buffer = torch.arange(next_n, device=self.device, dtype=torch.int32)
     self.decode_lens_buffer = torch.zeros(
+        (scheduler_config.max_num_batched_tokens,),
+        dtype=torch.int32,
+        device=self.device,
+    )
+    self.per_req_decode_lens_buffer = torch.zeros(
         (scheduler_config.max_num_batched_tokens,),
         dtype=torch.int32,
         device=self.device,
@@ -293,6 +319,11 @@ def _builder_init_body(self, *args, block_table_width: int, **kwargs) -> None:
         dtype=torch.int32,
         device=self.device,
     )
+    self.decode_indices_buffer = torch.zeros(
+        (scheduler_config.max_num_batched_tokens,),
+        dtype=torch.int32,
+        device=self.device,
+    )
     self.arange_buffer = torch.arange(
         max(
             scheduler_config.max_num_seqs * next_n,
@@ -300,6 +331,12 @@ def _builder_init_body(self, *args, block_table_width: int, **kwargs) -> None:
         ),
         dtype=torch.int32,
         device=self.device,
+    )
+    # Materialize the rank on device during builder initialization. Creating
+    # this scalar in build() would introduce a GPU<->CPU sync in the decode
+    # hot path.
+    self.dcp_rank_tensor = torch.tensor(
+        self.dcp_rank, dtype=torch.int32, device=self.device
     )
     self.expanded_block_table_buffer = torch.zeros(
         (scheduler_config.max_num_batched_tokens, block_table_width),
@@ -309,11 +346,13 @@ def _builder_init_body(self, *args, block_table_width: int, **kwargs) -> None:
 
     # See: DeepGEMM/csrc/apis/attention.hpp
     # PPU MODIFICATION: begin
-    if current_platform.is_ppu() and self.use_fp4_indexer_cache:
+    if current_platform.is_ppu() and self.indexer_uses_fp4:
         # NOTE(kai): fp4 paged using extra metadata
         # (num_sms * tb_per_cu + 1, 2)
         self.scheduler_metadata_buffer = torch.empty(
-            (self.num_sms * PPU_DEEP_GEMM_TB_PER_CU + 1, 2), dtype=torch.int32, device=self.device
+            (self.num_sms * PPU_DEEP_GEMM_TB_PER_CU + 1, 2),
+            dtype=torch.int32,
+            device=self.device,
         )
     else:
         self.scheduler_metadata_buffer = torch.empty(
@@ -325,7 +364,10 @@ def _builder_init_body(self, *args, block_table_width: int, **kwargs) -> None:
     self.compress_ratio = 1
     # Get compress_ratio for DeepseekV4 support
     if isinstance(self.kv_cache_spec, MLAAttentionSpec):
-        self.compress_ratio = self.kv_cache_spec.compress_ratio
+        # MLA compression is a whole number of tokens per state (fractions
+        # are whisper block pooling and never reach MLA).
+        assert isinstance(self.kv_cache_spec.tokens_per_state, int)
+        self.compress_ratio = self.kv_cache_spec.tokens_per_state
     if self.dcp_world_size > 1 and self.compress_ratio > 1:
         raise NotImplementedError(
             "DCP is not supported with sparse indexer KV compression "
@@ -347,6 +389,8 @@ def _builder_init_body(self, *args, block_table_width: int, **kwargs) -> None:
             dtype=torch.int32,
             device=self.device,
         )
+    self.indexer_decode_block_table_buffer: torch.Tensor | None = None
+    self._max_num_batched_tokens = scheduler_config.max_num_batched_tokens
 
 
 patch(
@@ -379,12 +423,11 @@ def _build_body(
     slot_mapping = common_attn_metadata.slot_mapping
     block_table = common_attn_metadata.block_table_tensor
     dcp_local_seq_lens = common_attn_metadata.dcp_local_seq_lens
-
     num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
         split_decodes_and_prefills(
             common_attn_metadata,
             decode_threshold=self.decode_threshold,
-            require_uniform=not self.use_flattening,
+            require_uniform=not (self.use_flattening or self.supports_varlen),
             treat_short_extends_as_decodes=not self.use_pcp,
         )
     )
@@ -394,7 +437,16 @@ def _build_body(
 
     compressed_slot_mapping = slot_mapping
     compressed_seq_lens = seq_lens
+    indexer_block_table = block_table
     if self.compress_ratio > 1:
+        kernel_block_size = self.kernel_block_size
+        if (
+            kernel_block_size is not None
+            and self.kv_cache_spec.block_size != kernel_block_size
+            and self.kv_cache_spec.block_size % kernel_block_size == 0
+        ):
+            factor = self.kv_cache_spec.block_size // kernel_block_size
+            indexer_block_table = (block_table[:, ::factor] // factor).contiguous()
         padded_num_tokens = num_tokens
         if self.pcp_world_size > 1:
             padded_num_tokens = slot_mapping.shape[0] // self.pcp_world_size
@@ -402,8 +454,8 @@ def _build_body(
             num_tokens,
             query_start_loc,
             seq_lens,
-            block_table,
-            self.kv_cache_spec.storage_block_size,
+            indexer_block_table,
+            self.kv_cache_spec.num_states,
             self.compress_ratio,
             out=self.compressed_slot_mapping_buffer,
         )
@@ -434,19 +486,56 @@ def _build_body(
         # slice below).
         assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
-        chunk_specs = split_indexer_prefill_chunks(
-            compressed_seq_lens_cpu[num_decodes:],
-            prefill_query_lens_cpu,
-            self.max_prefill_buffer_size,
-            max_logits_bytes,
-            request_offset=num_decodes,
-            # PPU MODIFICATION: begin
-            logits_dtype=torch.bfloat16 if self.use_fp4_indexer_cache else torch.float32,
-            # PPU MODIFICATION: end
-        )
+        req_idx = None
+        shard_rows = None
+        if self.use_pcp and self.dcp_world_size > 1:
+            # The gathered KV must be packed identically on every PCP rank:
+            # chunk by request from its DCP shard rows, which every rank
+            # holds. A dummy batch bypasses the PCP manager and has one
+            # row per request, so its own extent is the request's.
+            req_idx = common_attn_metadata.req_idx
+            if req_idx is None:
+                req_idx = np.arange(num_reqs)
+            shard_rows_cpu = common_attn_metadata.dcp_local_seq_lens_cpu_upper_bound
+            if shard_rows_cpu is None:
+                shard_rows_cpu = get_dcp_local_seq_lens(
+                    seq_lens_cpu,
+                    self.dcp_world_size,
+                    0,
+                    self.cp_kv_cache_interleave_size,
+                )
+            shard_rows = shard_rows_cpu.numpy()
+            chunk_specs = self._split_pcp_dcp_prefill_chunks(
+                req_idx[num_decodes:],
+                shard_rows[num_decodes:],
+                prefill_query_lens_cpu,
+                max_logits_bytes,
+                request_offset=num_decodes,
+            )
+        else:
+            chunk_specs = self._split_indexer_prefill_chunks(
+                compressed_seq_lens_cpu[num_decodes:],
+                prefill_query_lens_cpu,
+                self.max_prefill_buffer_size,
+                max_logits_bytes,
+                request_offset=num_decodes,
+                # PPU MODIFICATION: begin
+                logits_dtype=torch.bfloat16 if self.indexer_uses_fp4 else torch.float32,
+                # PPU MODIFICATION: end
+            )
 
         chunks = []
         for req_slice, query_slice in chunk_specs:
+            pcp_plan = None
+            if req_idx is not None:
+                assert shard_rows is not None
+                pcp_plan = build_pcp_global_chunk_plan(
+                    req_idx[req_slice],
+                    shard_rows[req_slice],
+                    self.dcp_world_size,
+                    self.device,
+                    self.cp_kv_cache_interleave_size,
+                )
             metadata = build_prefill_chunk_metadata(
                 req_slice.start,
                 req_slice.stop,
@@ -455,25 +544,35 @@ def _build_body(
                 seq_lens,
                 compressed_seq_lens,
                 compressed_seq_lens_cpu,
-                common_attn_metadata.block_table_tensor,
+                indexer_block_table,
                 self.compress_ratio,
                 query_slice=query_slice,
                 skip_kv_gather=query_slice.start > 0,
                 dcp_rank=self.dcp_rank,
                 dcp_world_size=self.dcp_world_size,
                 cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
+                pcp_plan=pcp_plan,
             )
             # Skip when total_seq_lens is 0 (i.e., no compressed token).
             if metadata is not None:
                 chunks.append(metadata)
-        prefill_metadata = DeepseekV32IndexerPrefillMetadata(chunks)
+        prefill_metadata = DeepseekV32IndexerPrefillMetadata(
+            chunks,
+            max_prefill_seq_len=(
+                int(seq_lens_cpu[num_decodes:].max().item()) if num_prefills > 0 else 0
+            ),
+        )
 
     decode_metadata = None
     if num_decodes > 0:
-        torch.diff(
-            common_attn_metadata.query_start_loc[: num_decodes + 1],
-            out=self.decode_lens_buffer[:num_decodes],
-        )
+        if not self.supports_varlen:
+            torch.diff(
+                common_attn_metadata.query_start_loc[: num_decodes + 1],
+                out=self.decode_lens_buffer[:num_decodes],
+            )
+            self.per_req_decode_lens_buffer[:num_decodes].copy_(
+                self.decode_lens_buffer[:num_decodes]
+            )
         decode_lens = self.decode_lens_buffer[:num_decodes]
         decode_lens_cpu = torch.diff(
             common_attn_metadata.query_start_loc_cpu[: num_decodes + 1]
@@ -494,37 +593,106 @@ def _build_body(
         block_table = common_attn_metadata.block_table_tensor[:num_decodes, ...]
 
         max_decode_len = int(decode_lens_cpu.max().item())
+        min_decode_len = int(decode_lens_cpu.min().item())
+        write_is_uniform = min_decode_len == max_decode_len
         next_n = 1 + self.num_speculative_tokens
-        use_native = not self.use_flattening and max_decode_len <= next_n
-
-        global_seq_lens_for_decode = self._prepare_global_decode_seq_lens(
-            global_seq_lens=global_seq_lens_for_decode,
-            decode_lens=decode_lens,
-            decode_lens_cpu=decode_lens_cpu,
-            query_start_loc=common_attn_metadata.query_start_loc[:num_decodes],
-            num_decode_tokens=num_decode_tokens,
-            use_native=use_native,
-            max_decode_len=max_decode_len,
+        # The kernel sees max_decode_len Q rows, not the configured next_n,
+        # so legality is per-step: on SM90 a uniformly 3-deep batch has no
+        # native kernel. max_decode_len <= 1 always has one.
+        step_next_n_ok = max_decode_len <= 1 or _supports_native_decode(max_decode_len)
+        use_native = (
+            not (self.use_flattening or self.supports_varlen)
+            and max_decode_len <= next_n
+            and step_next_n_ok
         )
 
-        seq_lens, block_table, decode_lens, batch_size, requires_padding = (
-            self._prepare_decode_tensors(
-                seq_lens=seq_lens,
-                block_table=block_table,
+        if not self.supports_varlen:
+            global_seq_lens_for_decode = self._prepare_global_decode_seq_lens(
+                global_seq_lens=global_seq_lens_for_decode,
                 decode_lens=decode_lens,
                 decode_lens_cpu=decode_lens_cpu,
                 query_start_loc=common_attn_metadata.query_start_loc[:num_decodes],
-                num_decodes=num_decodes,
                 num_decode_tokens=num_decode_tokens,
                 use_native=use_native,
-                next_n=next_n,
                 max_decode_len=max_decode_len,
             )
-        )
 
-        seq_lens_is_buffer_view = (use_native and next_n > 1) or (
-            not use_native and max_decode_len > 1
-        )
+        decode_indices = None
+        if self.supports_varlen:
+            from vllm.v1.attention.ops.metadata import (
+                _indexer_decode_metadata_kernel,
+            )
+
+            capacity = self.decode_seq_lens_buffer.numel()
+            grid = max(
+                num_decodes,
+                num_decode_tokens + triton.cdiv(capacity - num_decode_tokens, 256),
+            )
+            _indexer_decode_metadata_kernel[(grid,)](
+                query_start_loc,
+                seq_lens,
+                block_table,
+                self.decode_seq_lens_buffer,
+                self.expanded_block_table_buffer,
+                self.decode_lens_buffer,
+                self.decode_indices_buffer,
+                self.per_req_decode_lens_buffer,
+                num_decodes,
+                num_decode_tokens,
+                capacity,
+                block_table.stride(0),
+                self.expanded_block_table_buffer.stride(0),
+                BLOCK_COLS=block_table.shape[1],
+                num_warps=4,
+            )
+            seq_lens = self.decode_seq_lens_buffer[:num_decode_tokens]
+            block_table = self.expanded_block_table_buffer[:num_decode_tokens]
+            decode_lens = self.decode_lens_buffer[:num_decode_tokens]
+            decode_indices = self.decode_indices_buffer[:num_decode_tokens]
+            requires_padding = False
+            if global_seq_lens_for_decode is not None and max_decode_len > 1:
+                self.global_decode_seq_lens_buffer[:num_decode_tokens].copy_(seq_lens)
+                global_seq_lens_for_decode = self.global_decode_seq_lens_buffer[
+                    :num_decode_tokens
+                ]
+        else:
+            seq_lens, block_table, decode_lens, batch_size, requires_padding = (
+                self._prepare_decode_tensors(
+                    seq_lens=seq_lens,
+                    block_table=block_table,
+                    decode_lens=decode_lens,
+                    decode_lens_cpu=decode_lens_cpu,
+                    query_start_loc=common_attn_metadata.query_start_loc[:num_decodes],
+                    num_decodes=num_decodes,
+                    num_decode_tokens=num_decode_tokens,
+                    use_native=use_native,
+                    next_n=next_n,
+                    max_decode_len=max_decode_len,
+                )
+            )
+
+        if self.compress_ratio > 1:
+            kernel_block_size = self.kernel_block_size
+            if (
+                kernel_block_size is not None
+                and self.kv_cache_spec.block_size != kernel_block_size
+                and self.kv_cache_spec.block_size % kernel_block_size == 0
+            ):
+                factor = self.kv_cache_spec.block_size // kernel_block_size
+                compressed = block_table[:, ::factor] // factor
+                rows, cols = compressed.shape
+                if self.indexer_decode_block_table_buffer is None:
+                    self.indexer_decode_block_table_buffer = torch.zeros(
+                        (self._max_num_batched_tokens, cols),
+                        dtype=torch.int32,
+                        device=self.device,
+                    )
+                self.indexer_decode_block_table_buffer[:rows, :cols].copy_(compressed)
+                block_table = self.indexer_decode_block_table_buffer[:rows, :cols]
+
+        # Flattening always returns a buffer view, including single-token
+        # batches. Keep its address stable across varlen graph replays.
+        seq_lens_is_buffer_view = not use_native or next_n > 1
 
         # DCP: localize the now-expanded per-token global bounds to this
         # rank's owned KV. Done here (after expansion) so each token's global
@@ -557,7 +725,7 @@ def _build_body(
         metadata_extra = None
         if current_platform.is_ppu() and self.indexer_n_head > 0:
             metadata_extra = (
-                next_n,
+                seq_lens.shape[1],
                 self.indexer_n_head,
                 self.indexer_q_head_dim,
                 PPU_FP4_INDEXER_ELEMENT_SIZE,
@@ -567,7 +735,7 @@ def _build_body(
         if current_platform.is_ppu() and has_deep_gemm():
             scheduler_metadata = get_paged_mqa_logits_metadata(
                 seq_lens,
-                self.kv_cache_spec.storage_block_size,
+                self.kv_cache_spec.num_states,
                 self.num_sms,
                 metadata_extra,
             )
@@ -576,25 +744,33 @@ def _build_body(
         # PPU MODIFICATION: end
         # DeepGEMM is required for the paged MQA logits on CUDA devices
         # PPU MODIFICATION: begin
-        # Fork demotes this to an elif behind the PPU branch above.
-        elif current_platform.is_cuda() and has_deep_gemm():
-            # PPU MODIFICATION: end
-            self.scheduler_metadata_buffer[:] = get_paged_mqa_logits_metadata(
+        schedule_metadata = self.scheduler_metadata_buffer[:n]
+        if (
+            not current_platform.is_ppu()
+            and current_platform.is_cuda()
+            and has_deep_gemm()
+        ):
+            metadata = get_paged_mqa_logits_metadata(
+                # PPU MODIFICATION: end
                 seq_lens,
-                self.kv_cache_spec.storage_block_size,
+                self.kv_cache_spec.num_states,
                 self.num_sms,
+                indices=decode_indices,
             )
+            schedule_metadata = self.scheduler_metadata_buffer[: metadata.shape[0]]
+            schedule_metadata[:] = metadata
 
         decode_metadata = DeepSeekV32IndexerDecodeMetadata(
             block_table=block_table,
             seq_lens=seq_lens,
             decode_lens=decode_lens,
             requires_padding=requires_padding,
-            # PPU MODIFICATION: begin
-            # Fork slices [:n]; identical to the full buffer on the CUDA path.
-            schedule_metadata=self.scheduler_metadata_buffer[:n],
-            # PPU MODIFICATION: end
+            schedule_metadata=schedule_metadata,
+            indices=decode_indices,
             global_seq_lens=global_seq_lens_for_decode,
+            per_req_decode_lens=self.per_req_decode_lens_buffer[:num_decodes],
+            decode_is_uniform=write_is_uniform,
+            write_max_decode_len=max_decode_len,
         )
 
     attn_metadata = DeepseekV32IndexerMetadata(

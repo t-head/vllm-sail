@@ -12,7 +12,7 @@ support for a specific deployment.
 | Hardware | PPU cards ZW-810, ZW-810E and ZW-890 |
 | Native targets | PPU 1.0 (`ppu_10`) and PPU 1.5 (`ppu_15`) |
 | Bundled tuning data | Configurations include `PPU-ZW810`, `PPU-ZW810E` and `ZW-M890P`; coverage varies by shape and backend |
-| vLLM | `>=0.27.0,<0.28.0`; generated native sources pinned to v0.27.1 |
+| vLLM | `>=0.30.0,<0.31.0`; generated native sources pinned to v0.30.0 |
 | Python | 3.10–3.13 for the plugin and CPU test matrix; SDK wheel availability determines runtime combinations |
 
 A tuned configuration describes a measured kernel shape. It does not establish
@@ -28,7 +28,7 @@ need workload-specific tuning.
 | FlashAttention | PPU FlashAttention 2 and 3 integration | Matching SDK libraries; version selection follows availability and model constraints |
 | MLA and sparse attention | PPU FlashMLA integration and sparse indexer | Matching PPU libraries; FP8 dense FlashMLA decode is unavailable |
 | Gated delta networks | PLA and Triton paths for GDN | PLA availability and supported shapes determine dispatch |
-| Kimi delta attention | PLA and Triton paths for KDA | Backend and sequence-shape constraints apply |
+| Kimi delta attention | PLA and Triton paths for KDA | PLA prefill retains final recurrent state; intermediate prefill checkpoints are disabled. Backend and sequence-shape constraints apply |
 | Native operations | HGGC activation, normalization, quantization, routing, cache, sampling and model-specific kernels | Only the selected source corpus is compiled; each changed kernel needs device correctness tests |
 | Distributed MoE | DeepEP integration, including low-latency receive handling | Compatible PPU communication libraries and a validated multi-device setup |
 

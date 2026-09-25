@@ -25,7 +25,7 @@ class ppu_ops:
             direct_register_custom_op(
                 op_name="ppu_sparse_attn_indexer",
                 op_func=ppu_sparse_attn_indexer,
-                mutates_args=["topk_indices_buffer"],
+                mutates_args=["topk_indices_buffer", "candidate_blocks"],
                 fake_impl=ppu_sparse_attn_indexer_fake,
                 dispatch_key=current_platform.dispatch_key,
             )

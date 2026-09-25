@@ -33,7 +33,7 @@ _CONFIG_MODULE = "vllm.model_executor.layers.fused_moe.config"
 _INT8_ORACLE_MODULE = "vllm.model_executor.layers.fused_moe.oracle.int8"
 _UTILS_MODULE = "vllm.model_executor.layers.fused_moe.utils"
 _TRITON_MODULE = "vllm.model_executor.layers.fused_moe.experts.triton_moe"
-# By-value imports present in vLLM 0.27. Keep this inventory checked against
+# By-value imports present in vLLM 0.30. Keep this inventory checked against
 # upstream source; importing optional EP backends here would load their SDKs.
 _QUANTIZE_INPUT_CONSUMERS = tuple(
     "vllm.model_executor.layers.fused_moe." + suffix
@@ -52,8 +52,8 @@ _QUANTIZE_INPUT_CONSUMERS = tuple(
         "prepare_finalize.nixl_ep",
         "prepare_finalize.no_dp_ep",
     )
-)
-AFFECTED_VERSIONS = ">=0.27.0,<0.28.0"
+) + ("vllm.model_executor.models.k2_horizon",)
+AFFECTED_VERSIONS = ">=0.30.0,<0.31.0"
 
 REASON_DTYPE_STR = (
     "PPU int8 W8A8 MoE flows look up tuned configs by the name int8_w8a8; "

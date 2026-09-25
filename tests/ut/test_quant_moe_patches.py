@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import os
 import sys
 import types
 from collections.abc import Iterator
@@ -397,9 +398,12 @@ def test_mxfp4_quantize_aliases_preserve_other_overrides(monkeypatch) -> None:
 
 
 def test_mxfp4_quantize_alias_inventory_matches_vllm_source() -> None:
-    vllm = pytest.importorskip("vllm")
+    if source := os.environ.get("VLLM_SOURCE_ROOT"):
+        root = Path(source).resolve() / "vllm"
+    else:
+        vllm = pytest.importorskip("vllm")
+        root = Path(vllm.__file__).resolve().parent
     module = _leaf("fused_moe_ppu")
-    root = Path(vllm.__file__).resolve().parent
     discovered = set()
     for path in root.rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))

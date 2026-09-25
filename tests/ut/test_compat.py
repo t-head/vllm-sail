@@ -44,11 +44,11 @@ def compat(monkeypatch: pytest.MonkeyPatch) -> Iterator[types.ModuleType]:
 @pytest.mark.parametrize(
     ("version", "expected"),
     [
-        ("0.27.0", (0, 27, 0)),
-        ("v0.27.0", (0, 27, 0)),
-        ("0.27", (0, 27)),
-        ("0.27.1+cu128", (0, 27, 1)),
-        ("0.27.0rc1", (0, 27, 0)),
+        ("0.30.0", (0, 30, 0)),
+        ("v0.30.0", (0, 30, 0)),
+        ("0.30", (0, 30)),
+        ("0.30.1+cu128", (0, 30, 1)),
+        ("0.30.0rc1", (0, 30, 0)),
         # Numeric parsing stops at the first non-numeric chunk, so a setuptools-scm
         # dev version yields a misleadingly low key -- which is exactly why
         # is_dev_build() exists.
@@ -63,16 +63,16 @@ def test_version_key_parses(compat, version: str, expected: tuple[int, ...]) -> 
     "version",
     [
         "0.1.dev1+g4bdc8a788",
-        "0.28.0.dev5",
-        "0.27.1+g1234567",
-        "0.27.0rc2.dev3+gabcdef0",
+        "0.31.0.dev5",
+        "0.30.1+g1234567",
+        "0.30.0rc2.dev3+gabcdef0",
     ],
 )
 def test_is_dev_build(compat, version: str) -> None:
     assert compat.is_dev_build(version)
 
 
-@pytest.mark.parametrize("version", ["0.27.0", "v0.27.1", "0.27.0rc1", "0.27.1+cu128"])
+@pytest.mark.parametrize("version", ["0.30.0", "v0.30.1", "0.30.0rc1", "0.30.1+cu128"])
 def test_is_not_dev_build(compat, version: str) -> None:
     assert not compat.is_dev_build(version)
 
@@ -82,7 +82,7 @@ def test_check_rejects_unverifiable_shallow_clone_dev_build(
 ) -> None:
     """A shallow git clone reports 0.1.devN+g<hash>, which parses to (0, 1).
 
-    That prefix cannot distinguish a supported v0.27 checkout from an unsupported
+    That prefix cannot distinguish a supported v0.30 checkout from an unsupported
     checkout, so the caller must provide an authoritative VLLM_VERSION override.
     """
     monkeypatch.delenv("VLLM_VERSION", raising=False)
@@ -94,10 +94,10 @@ def test_check_rejects_unverifiable_shallow_clone_dev_build(
 def test_check_accepts_supported_dev_build_with_meaningful_version(
     compat, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A v0.27-based source build remains usable without an override."""
+    """A v0.30-based source build remains usable without an override."""
     monkeypatch.delenv("VLLM_VERSION", raising=False)
     monkeypatch.setattr(
-        compat, "installed_vllm_version", lambda: "0.27.1.dev5+g1234567"
+        compat, "installed_vllm_version", lambda: "0.30.1.dev5+g1234567"
     )
     with caplog.at_level(logging.WARNING):
         compat.check_vllm_compatibility(force=True)
@@ -107,9 +107,9 @@ def test_check_accepts_supported_dev_build_with_meaningful_version(
 @pytest.mark.parametrize(
     "version",
     [
-        "0.28.0.dev5+gabcdef0",
-        "0.28.1.dev58+g40cf03ae64",
-        "0.29.0.dev1+gabcdef0",
+        "0.31.0.dev5+gabcdef0",
+        "0.31.1.dev58+g40cf03ae64",
+        "0.32.0.dev1+gabcdef0",
     ],
 )
 def test_check_rejects_unsupported_dev_build_without_override(
@@ -139,22 +139,22 @@ def test_version_key_unparseable(compat, version: str) -> None:
 def test_installed_version_env_override(
     compat, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("VLLM_VERSION", " 0.27.0 ")
-    assert compat.installed_vllm_version() == "0.27.0"
+    monkeypatch.setenv("VLLM_VERSION", " 0.30.0 ")
+    assert compat.installed_vllm_version() == "0.30.0"
 
 
 def test_vllm_version_is(compat, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("VLLM_VERSION", "0.27.0+cu128")
-    assert compat.vllm_version_is("0.27.0")
-    assert compat.vllm_version_is("v0.27.0")
-    assert not compat.vllm_version_is("0.27.1")
+    monkeypatch.setenv("VLLM_VERSION", "0.30.0+cu128")
+    assert compat.vllm_version_is("0.30.0")
+    assert compat.vllm_version_is("v0.30.0")
+    assert not compat.vllm_version_is("0.30.1")
 
 
 def test_vllm_version_at_least(compat, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("VLLM_VERSION", "0.27.1")
-    assert compat.vllm_version_at_least("0.27.0")
-    assert compat.vllm_version_at_least("0.27.1")
-    assert not compat.vllm_version_at_least("0.28.0")
+    monkeypatch.setenv("VLLM_VERSION", "0.30.1")
+    assert compat.vllm_version_at_least("0.30.0")
+    assert compat.vllm_version_at_least("0.30.1")
+    assert not compat.vllm_version_at_least("0.31.0")
 
 
 def test_vllm_version_at_least_unparseable_is_false(
@@ -162,10 +162,10 @@ def test_vllm_version_at_least_unparseable_is_false(
 ) -> None:
     """An unjudgeable version must not be reported as satisfying a bound."""
     monkeypatch.setenv("VLLM_VERSION", "unknown")
-    assert not compat.vllm_version_at_least("0.27.0")
+    assert not compat.vllm_version_at_least("0.30.0")
 
 
-@pytest.mark.parametrize("version", ["0.27.0", "0.27.9", "0.27.1+cu128"])
+@pytest.mark.parametrize("version", ["0.30.0", "0.30.9", "0.30.1+cu128"])
 def test_check_accepts_supported_range(
     compat, monkeypatch: pytest.MonkeyPatch, version: str
 ) -> None:
@@ -173,7 +173,7 @@ def test_check_accepts_supported_range(
     compat.check_vllm_compatibility(force=True)  # must not raise
 
 
-@pytest.mark.parametrize("version", ["0.26.0", "0.28.0", "1.0.0"])
+@pytest.mark.parametrize("version", ["0.27.0", "0.31.0", "1.0.0"])
 def test_check_rejects_out_of_range(
     compat, monkeypatch: pytest.MonkeyPatch, version: str
 ) -> None:
@@ -191,18 +191,18 @@ def test_check_rejects_unparseable(compat, monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_failed_check_is_not_cached(compat, monkeypatch: pytest.MonkeyPatch) -> None:
     """A caught failure must not make the next no-force check skip validation."""
-    monkeypatch.setenv("VLLM_VERSION", "0.28.0")
+    monkeypatch.setenv("VLLM_VERSION", "0.31.0")
     with pytest.raises(RuntimeError, match="requires vLLM"):
         compat.check_vllm_compatibility(force=True)
 
-    monkeypatch.setenv("VLLM_VERSION", "0.27.0")
+    monkeypatch.setenv("VLLM_VERSION", "0.30.0")
     compat.check_vllm_compatibility()
     assert compat._checked is True
 
 
 def test_check_is_cached_without_force(compat, monkeypatch: pytest.MonkeyPatch) -> None:
     """The check runs once per process; register_out_of_tree relies on that."""
-    monkeypatch.setenv("VLLM_VERSION", "0.27.0")
+    monkeypatch.setenv("VLLM_VERSION", "0.30.0")
     compat.check_vllm_compatibility(force=True)
 
     # Now an unsupported version would raise -- but the cached flag short-circuits.
@@ -214,6 +214,6 @@ def test_check_is_cached_without_force(compat, monkeypatch: pytest.MonkeyPatch) 
     assert compat._checked is False
 
     # A failed forced refresh must not leave the old successful result cached.
-    monkeypatch.setenv("VLLM_VERSION", "0.27.0")
+    monkeypatch.setenv("VLLM_VERSION", "0.30.0")
     compat.check_vllm_compatibility()
     assert compat._checked is True
