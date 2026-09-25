@@ -161,7 +161,7 @@ class _CMakeBuildExt(build_ext):
         self._run(configure)
 
         build = [configure[0], "--build", str(build_dir)]
-        jobs = self.parallel or os.cpu_count() or 1
+        jobs = _toolchain.build_parallelism(self.parallel)
         build += ["--parallel", str(jobs)]
         self._run(build)
 

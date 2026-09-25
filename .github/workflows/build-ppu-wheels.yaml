@@ -33,8 +33,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: build-ppu-wheels-${{ github.run_id }}
-  cancel-in-progress: false
+  group: build-ppu-wheels-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -50,8 +50,30 @@ jobs:
       PYTORCH_SAIL_ARCH: ${{ inputs.pytorch_sail_arch }}
       ARTIFACT_DIR: ${{ github.workspace }}/artifacts
     steps:
+      - name: Disable internal GitHub mirror rewrite
+        shell: bash
+        run: |
+          # The self-hosted CPU runner image ships a global/system git
+          # url.<internal-mirror>.insteadOf = https://github.com rewrite. Left in
+          # place it makes actions/checkout fetch from the internal mirror and
+          # fail, so strip only the github.com rewrites before checkout.
+          for scope in system global; do
+            echo "=== ${scope} insteadOf before ==="
+            git config --${scope} --get-regexp '^url\..*\.insteadof$' 2>/dev/null || true
+            while IFS= read -r section; do
+              [ -n "${section}" ] || continue
+              git config --${scope} --unset-all "${section}.insteadOf" 2>/dev/null || true
+            done < <(git config --${scope} --get-regexp '^url\..*\.insteadof$' 2>/dev/null | awk '$2 ~ /github\.com/ {sub(/\.insteadof$/, "", $1); print $1}')
+          done
+          echo "=== insteadOf after (system) ==="
+          git config --system --get-regexp '^url\..*\.insteadof$' 2>/dev/null || echo none
+          echo "=== insteadOf after (global) ==="
+          git config --global --get-regexp '^url\..*\.insteadof$' 2>/dev/null || echo none
+
       - name: Check out vLLM SAIL
         uses: actions/checkout@v4
+        with:
+          github-server-url: https://github.com
 
       - name: Build wheels
         run: bash scripts/ci/build_ppu_wheels.sh

@@ -360,3 +360,32 @@ def test_empty_build_settings_use_defaults(nowhere: str, value: str) -> None:
     assert defines["PYTORCH_SAIL_ARCH"] == toolchain.DEFAULT_HG_ARCH
     assert defines["CMAKE_HG_STANDARD"] == toolchain.DEFAULT_HG_STANDARD
     assert "CMAKE_HG_FLAGS" not in defines
+
+
+def test_build_parallelism_honours_explicit_setuptools_j() -> None:
+    # An explicit ``setup.py build_ext -j N`` must win over everything else.
+    jobs = toolchain.build_parallelism(4, env={"MAX_JOBS": "8"}, cpu_count=64)
+    assert jobs == 4
+
+
+def test_build_parallelism_uses_max_jobs_env() -> None:
+    # Without an explicit -j, MAX_JOBS caps the cmake --parallel level so a
+    # many-core, smaller-memory runner does not OOM (exit 137).
+    jobs = toolchain.build_parallelism(None, env={"MAX_JOBS": "8"}, cpu_count=64)
+    assert jobs == 8
+
+
+def test_build_parallelism_falls_back_to_cpu_count() -> None:
+    jobs = toolchain.build_parallelism(None, env={}, cpu_count=64)
+    assert jobs == 64
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "abc", "", " "])
+def test_build_parallelism_ignores_invalid_max_jobs(value: str) -> None:
+    jobs = toolchain.build_parallelism(None, env={"MAX_JOBS": value}, cpu_count=64)
+    assert jobs == 64
+
+
+def test_build_parallelism_defaults_to_one_when_unknown() -> None:
+    jobs = toolchain.build_parallelism(None, env={}, cpu_count=None)
+    assert jobs == 1

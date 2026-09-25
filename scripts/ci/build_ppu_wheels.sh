@@ -13,7 +13,29 @@ TORCH_URL="${TORCH_URL:-https://art-pub.eng.t-head.cn/artifactory/apackage/daily
 VLLM_REPOSITORY="${VLLM_REPOSITORY:-https://github.com/vllm-project/vllm.git}"
 VLLM_REF="${VLLM_REF:-releases/v0.27.1}"
 PYTORCH_SAIL_ARCH="${PYTORCH_SAIL_ARCH:-ppu_15;ppu_10}"
-BUILD_JOBS="${BUILD_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf '1')}"
+# Building the native PPU kernels is memory-heavy (~2 GiB per compile job). The
+# CPU runner exposes many cores but a smaller memory limit, so an unbounded
+# MAX_JOBS makes the OOM killer terminate the pod (exit 137). Derive a safe
+# default from the cgroup memory limit (falling back to MemTotal) and apply a
+# conservative ceiling. Override explicitly with BUILD_JOBS.
+default_jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf '1')"
+mem_bytes=0
+if [[ -r /sys/fs/cgroup/memory.max ]]; then
+    read -r mem_bytes </sys/fs/cgroup/memory.max || mem_bytes=0
+    [[ "${mem_bytes}" == "max" ]] && mem_bytes=0
+elif [[ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]]; then
+    read -r mem_bytes </sys/fs/cgroup/memory/memory.limit_in_bytes || mem_bytes=0
+fi
+if [[ ! "${mem_bytes}" =~ ^[0-9]+$ ]] || ((mem_bytes <= 0 || mem_bytes > 1099511627776)); then
+    mem_bytes="$(awk '/MemTotal/{print $2*1024}' /proc/meminfo 2>/dev/null || printf '0')"
+fi
+if [[ "${mem_bytes}" =~ ^[0-9]+$ ]] && ((mem_bytes > 0)); then
+    mem_jobs=$((mem_bytes / (2 * 1024 * 1024 * 1024)))
+    ((mem_jobs < 1)) && mem_jobs=1
+    ((default_jobs > mem_jobs)) && default_jobs="${mem_jobs}"
+fi
+((default_jobs > 16)) && default_jobs=16
+BUILD_JOBS="${BUILD_JOBS:-${default_jobs}}"
 
 mkdir -p "${VLLM_WHEEL_DIR}" "${SAIL_WHEEL_DIR}" "${LOG_DIR}"
 : >"${MANIFEST}"
@@ -108,6 +130,12 @@ export PYTORCH_SAIL_ARCH
 unset TORCH_CUDA_ARCH_LIST
 unset VLLM_SAIL_HG_ARCH
 unset VLLM_SAIL_SKIP_EXT
+# envsetup.sh repoints pip at an internal mirror (art.eng.t-head.cn) that is
+# unreachable from the CPU runner; force the public Aliyun PyPI mirror after the
+# SDK env is sourced. Override with SAIL_PIP_INDEX_URL. All packages installed
+# via pip are ordinary PyPI packages; PPU-specific components come from the SDK
+# and torch archive (installed from local wheels), not from any pip index.
+export PIP_INDEX_URL="${SAIL_PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}"
 
 TORCH_DIR="${WORK_DIR}/torch"
 mkdir -p "${TORCH_DIR}"
