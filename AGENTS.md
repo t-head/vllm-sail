@@ -13,6 +13,7 @@ User-facing overview: [README.md](README.md). Contribution workflow:
 - Plugin runtime and build variables use `VLLM_SAIL_*`. Runtime variables retain
   corresponding `VLLM_PPU_*` aliases, with SAIL taking precedence. Build variables
   accept only the `VLLM_SAIL_*` names.
+- Declare runtime variables in `vllm_sail/envs.py` and keep their access lazy.
 
 ## Verification
 
@@ -20,6 +21,7 @@ From the repository root:
 
 ```bash
 .venv-test/bin/python -m pytest tests/ut -q
+.venv-test/bin/pre-commit run --files path/to/changed_file.py
 ```
 
 CI uses `python -m pytest tests/ut -q` with only `requirements/dev.txt` installed,
@@ -42,13 +44,15 @@ making hardware or model-support claims.
   Edit inputs or transformations and regenerate.
 - `csrc/plugin/` contains authored HGGC sources and host bindings. Edit these
   directly; its manifest lists the files compiled into the plugin extensions.
-- Preserve entry-point idempotency: vLLM loads general plugins in every process.
+- Preserve lazy imports and entry-point idempotency: vLLM loads general plugins
+  in every process. Importing the package must not install patches or registries.
 - Preserve dirty and untracked work. Use topic branches and pull requests for
   code publication; never force-push or push directly to shared branches.
 
 ## Routes
 
 - Module and dependency boundaries: [Architecture](docs/developer_guide/architecture.md).
+  PPU reuses CUDA paths; use `current_platform.is_ppu()` for PPU-only behavior.
 - Patches: [Runtime patch guide](vllm_sail/patch/README.md). Try registration APIs,
   platform hooks and attention extensions first. Every patch requires `reason`,
   `affected_versions` and `remove_when`.
@@ -84,3 +88,6 @@ Use the pinned pre-commit hooks on changed files; do not reformat unrelated
 code. Keep public documentation focused on PPU usage and development. Internal
 specifications, phase reports and personal run records belong outside the
 repository. Use maintained guide paths for new cross-references.
+
+Follow `CONTRIBUTING.md` for PR titles and complete the
+[PR template](.github/pull_request_template.md).

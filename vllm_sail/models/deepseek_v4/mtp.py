@@ -39,9 +39,7 @@ class DeepSeekV4MTP(NvidiaDeepSeekV4MTP):
     """
 
     @override
-    def load_weights(
-        self, weights: Iterable[tuple[str, torch.Tensor]]
-    ) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         # Reuse the parent's internal helpers
         def _remap_weight_name(name: str) -> str:
             remap_table = {
@@ -130,10 +128,7 @@ class DeepSeekV4MTP(NvidiaDeepSeekV4MTP):
             name = _remap_weight_name(name)
             name = self._rewrite_spec_layer_name(spec_layer, name)
 
-            if (
-                spec_layer != self.model.mtp_start_layer_idx
-                and ".layers" not in name
-            ):
+            if spec_layer != self.model.mtp_start_layer_idx and ".layers" not in name:
                 continue
             if name.endswith(".scale"):
                 suffix = (
@@ -184,9 +179,7 @@ class DeepSeekV4MTP(NvidiaDeepSeekV4MTP):
                     param = params_dict[name]
                     # Attention sink TP slicing
                     if name.endswith(".attn_sink"):
-                        loaded_weight = loaded_weight[
-                            head_rank_start:head_rank_end
-                        ]
+                        loaded_weight = loaded_weight[head_rank_start:head_rank_end]
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
                     )

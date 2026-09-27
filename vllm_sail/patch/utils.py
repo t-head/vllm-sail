@@ -60,7 +60,9 @@ class PatchRecord:
 PATCH_REGISTRY: list[PatchRecord] = []
 
 
-def _validate_metadata(target: str, reason: str, affected_versions: str, remove_when: str) -> None:
+def _validate_metadata(
+    target: str, reason: str, affected_versions: str, remove_when: str
+) -> None:
     for name, value in (
         ("reason", reason),
         ("affected_versions", affected_versions),
@@ -206,7 +208,7 @@ def _patch_module_attribute(
 
 def _unwrap_class_descriptor(attribute: Any) -> Any:
     """Return the implementation stored inside a supported class descriptor."""
-    if isinstance(attribute, (staticmethod, classmethod)):
+    if isinstance(attribute, staticmethod | classmethod):
         return attribute.__func__
     if isinstance(attribute, property):
         return attribute.fget
@@ -233,7 +235,7 @@ def _build_class_attribute(
             original_attribute.fdel,
             original_attribute.__doc__,
         )
-    if isinstance(replacement_attribute, (staticmethod, classmethod, property)):
+    if isinstance(replacement_attribute, staticmethod | classmethod | property):
         raise TypeError(
             f"Replacement descriptor does not match {full_target_name}: upstream "
             "is a plain function but the replacement is a descriptor."
@@ -266,8 +268,8 @@ def _patch_class_method(
     remove_when: str,
 ) -> Callable[[PatchTarget], PatchTarget]:
     """Replace a class method or property through a dotted attribute path."""
-    target_class_path, separator, target_attribute_name = target_attribute_path.rpartition(
-        "."
+    target_class_path, separator, target_attribute_name = (
+        target_attribute_path.rpartition(".")
     )
     if not separator or not target_class_path or not target_attribute_name:
         raise ValueError("Class patches require a path such as 'TargetClass.method'")

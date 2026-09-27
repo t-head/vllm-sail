@@ -21,6 +21,7 @@ def _ReplicatedLinear_forward(
         nvtx_pop_range_for_gemm,
         nvtx_push_range_for_gemm,
     )
+
     NVTX_PROFILE = True
     # PPU MODIFICATION: end
     bias = self.bias if not self.skip_bias_add else None
@@ -28,9 +29,7 @@ def _ReplicatedLinear_forward(
     assert self.quant_method is not None
     if NVTX_PROFILE:
         tmp_weight = getattr(self, "weight", None)
-        nvtx_push_range_for_gemm(
-            "ReplicatedLinear", x, tmp_weight, None, None, bias
-        )
+        nvtx_push_range_for_gemm("ReplicatedLinear", x, tmp_weight, None, None, bias)
     # PPU MODIFICATION: end
     output = self.quant_method.apply(self, x, bias)
     # PPU MODIFICATION: begin
@@ -61,6 +60,7 @@ def _ColumnParallelLinear_forward(
         nvtx_pop_range_for_gemm,
         nvtx_push_range_for_gemm,
     )
+
     NVTX_PROFILE = True
     # PPU MODIFICATION: end
     bias = self.bias if not self.skip_bias_add else None
@@ -111,14 +111,13 @@ def _RowParallelLinear_forward(
         nvtx_pop_range_for_gemm,
         nvtx_push_range_for_gemm,
     )
+
     NVTX_PROFILE = True
     # PPU MODIFICATION: end
     if self.input_is_parallel:
         input_parallel = input_
     else:
-        split_input = split_tensor_along_last_dim(
-            input_, num_partitions=self.tp_size
-        )
+        split_input = split_tensor_along_last_dim(input_, num_partitions=self.tp_size)
         input_parallel = split_input[self.tp_rank].contiguous()
 
     # Matrix multiply.

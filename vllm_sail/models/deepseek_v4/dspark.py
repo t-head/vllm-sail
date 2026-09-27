@@ -89,7 +89,8 @@ def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
             or param_key.endswith(".weight_scale_inv")
         ):
             non_expert_scale_suffix = (
-                ".weight_scale" if param_key.endswith(".weight_scale")
+                ".weight_scale"
+                if param_key.endswith(".weight_scale")
                 else ".weight_scale_inv"
             )
             break
@@ -126,10 +127,7 @@ def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
 
         # E8M0 expert scales: keep raw exponent bytes.
         if ".experts." in name:
-            if (
-                "weight_scale" in name
-                and loaded_weight.dtype == torch.float8_e8m0fnu
-            ):
+            if "weight_scale" in name and loaded_weight.dtype == torch.float8_e8m0fnu:
                 loaded_weight = loaded_weight.view(torch.uint8)
             for param_name, weight_name, expert_id, shard_id in expert_mapping:
                 if weight_name not in name:

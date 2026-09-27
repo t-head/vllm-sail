@@ -58,7 +58,7 @@ def _model_classes():
     )
 
     register_model()
-    for arch, cls in (
+    for arch, _cls in (
         ("MiniMaxM3SparseForCausalLM", MiniMaxM3SparseForCausalLM),
         (
             "MiniMaxM3SparseForConditionalGeneration",

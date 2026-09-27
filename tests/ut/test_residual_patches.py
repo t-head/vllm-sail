@@ -35,11 +35,7 @@ import pytest
 from vllm_sail.patch.utils import PATCH_MARKER, PATCH_REGISTRY
 
 RESIDUAL_DIR = (
-    Path(__file__).parents[2]
-    / "vllm_sail"
-    / "patch"
-    / "enhancement"
-    / "residual"
+    Path(__file__).parents[2] / "vllm_sail" / "patch" / "enhancement" / "residual"
 )
 MODULE_NAMES = (
     "all2all_deepep_shrink",

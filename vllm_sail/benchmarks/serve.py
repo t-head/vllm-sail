@@ -62,6 +62,7 @@ async def benchmark(
 ):
     # PPU MODIFICATION: begin
     from vllm_sail.benchmarks.serve import _start_active_profile as start_active_profile
+
     if skip_first_concurrency and (max_concurrency is None or max_concurrency <= 0):
         raise ValueError("--skip-first-concurrency requires positive --max-concurrency")
     # PPU MODIFICATION: end
@@ -236,7 +237,7 @@ async def benchmark(
 
     # PPU MODIFICATION: begin
     async def limited_request_func(request_func_input, session, pbar, task_id):
-    # PPU MODIFICATION: end
+        # PPU MODIFICATION: end
         async with semaphore:
             # PPU MODIFICATION: begin
             if skip_first_concurrency:
@@ -322,7 +323,7 @@ async def benchmark(
             req_model_id, req_model_name = req_lora_module, req_lora_module
 
         mm_content_typed: dict[str, Any] | list[dict[str, Any]] | None = None
-        if isinstance(mm_content, (dict, list)):
+        if isinstance(mm_content, dict | list):
             mm_content_typed = mm_content
 
         request_func_input = RequestFuncInput(

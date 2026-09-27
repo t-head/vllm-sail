@@ -1,19 +1,8 @@
 # Contributing to vLLM SAIL
 
-Thank you for contributing. Documentation, bug reports, tests, PPU kernel
-implementations and performance improvements all help make the project useful
-to more developers.
-
-## Find a place to start
-
-- Improve an installation step or add a minimal reproducer for an issue.
-- Add CPU coverage for plugin registration, configuration or packaging.
-- Validate a kernel on PPU and report the exact environment and numerical result.
-- Tune a workload or implement a missing backend capability.
-
-Check existing issues and pull requests before starting. For a substantial API,
-dependency or architecture change, open an issue describing the problem and
-proposed design so maintainers can discuss the scope before implementation.
+Contributions to documentation, tests, PPU kernels and performance are welcome.
+Check existing issues and pull requests before starting. Discuss substantial
+API, dependency or architecture changes in an issue first.
 
 ## Development environment
 
@@ -56,26 +45,23 @@ See [Architecture](docs/developer_guide/architecture.md) for module boundaries.
 
 ## Checks before review
 
-Run the CPU merge gate:
+Run the CPU tests and formatting checks:
 
 ```bash
 python -m pytest tests/ut -q
-```
-
-Run the repository's pinned formatting and hygiene hooks on changed files:
-
-```bash
 pre-commit run --files path/to/changed_file.py
 ```
 
-The pre-commit configuration pins Ruff. Restrict unrelated formatting changes
-to a separate pull request. Add tests for meaningful behavior changes; keep
-test dependencies within the existing CPU or device tier.
+For staged files or a full repository check:
 
-For native or runtime changes, report the additional commands in
-[Verification](docs/user_guide/verification_guide.md). Say explicitly which
-device checks you could not run. Documentation changes should have working
-relative links and commands consistent with the current code.
+```bash
+pre-commit run
+pre-commit run --all-files --hook-stage manual
+```
+
+Add tests for behavior changes and keep formatting changes focused. For native
+or runtime changes, follow [Verification](docs/user_guide/verification_guide.md)
+and report any checks that were not run. Verify links and commands in docs.
 
 ## Pull request workflow
 
@@ -85,11 +71,14 @@ relative links and commands consistent with the current code.
 4. Push the topic branch to your fork and open a pull request.
 5. Address review feedback; merge through the platform after review.
 
-Use a descriptive title. In the description, explain the concrete problem, the
-resulting behavior and how it was validated. Link a related issue when there is
-one. For performance changes, include a reproducible baseline and the same
-workload on the candidate. Avoid force pushes and direct pushes to shared
-branches; follow-up commits keep review history available.
+Use vLLM-style PR titles: `[Type][Scope] Concise behavior-oriented summary`,
+with an optional scope. For example, `[Bugfix][MoE] Honor explicit backend
+selection` or `[Doc] Clarify native build prerequisites`.
+
+Complete the [PR template](.github/pull_request_template.md), link related issues
+and include test commands and results. Performance changes need baseline and
+candidate measurements under the same workload. Avoid force pushes and direct
+pushes to shared branches; use follow-up commits for review changes.
 
 ## Reporting issues
 

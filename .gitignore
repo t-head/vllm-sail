@@ -1,14 +1,51 @@
+# macOS metadata
+.DS_Store
+._*
+
+# Python bytecode and packaging
 __pycache__/
 *.py[cod]
 *.egg-info/
 build/
 dist/
+vllm_sail/_version.py
+
+# Local environments and tool caches
 .venv*/
+venv/
+.cache/
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.pytype/
+.pyre/
+.hypothesis/
+.tox/
+.nox/
+.ipynb_checkpoints/
+.triton/
+
+# Test and coverage output
 .coverage*
 htmlcov/
-vllm_sail/_version.py
+coverage.xml
+coverage.json
+
+# Native build output
+*.so
+*.dylib
+*.dll
+*.pyd
+*.o
+*.obj
+*.a
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+.ninja_deps
+.ninja_log
+/cmake-build-*/
 
 # Generated local tuning results; reviewed package configs are tracked separately.
 /benchmarks/kernels/fusedmoe_tuning_tools/*.json
