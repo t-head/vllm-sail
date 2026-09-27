@@ -1,18 +1,11 @@
-## Purpose
+### What this PR does / why we need it?
 
-<!-- Describe the problem and the resulting behavior. Link a related issue if applicable. -->
+<!-- Describe the problem and the change. Link related issues if applicable. -->
 
-## Changes
+### Does this PR introduce *any* user-facing change?
 
-<!-- Summarize the implementation and any interface, dependency or compatibility changes. -->
+<!-- Describe changes to behavior, APIs or configuration, or write None. -->
 
-## Validation
+### How was this patch tested?
 
-<!-- List exact commands and results. Distinguish CPU tests, generation checks, HGGC builds, device correctness and model runs. State what was not run and why. For performance changes, include baseline and candidate measurements under the same workload. -->
-
-## Review checklist
-
-- [ ] Relevant tests and documentation are included.
-- [ ] CPU unit tests pass, or the reason they were not run is explained above.
-- [ ] Native changes include applicable device evidence, or an explicit validation gap; upstream kernel changes include regenerated sources.
-- [ ] Logs and examples contain no credentials or private environment details.
+<!-- List test commands and results. State what was not run and why. -->
