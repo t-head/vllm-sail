@@ -181,9 +181,9 @@ def _build_stub_vllm(
     )
 
     def is_layer_skipped(
-        prefix, ignored_layers, fused_mapping=None, skip_with_substr=False
+        prefix, ignored_layers, fused_mapping=None, *, match_mode="exact"
     ):
-        if skip_with_substr:
+        if match_mode == "substring":
             return any(needle in prefix for needle in ignored_layers)
         return prefix in ignored_layers
 

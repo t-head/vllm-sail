@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Run the PPU DeepGEMM warmup from ``kernel_warmup``.
+"""Exclude CuTeDSL on PPU and run the PPU DeepGEMM warmup.
 
 Upstream ``warmup/kernel_warmup.py`` ends with a DeepGEMM warmup block gated
 on ``is_deep_gemm_supported()``, which upstream defines via
@@ -9,10 +9,11 @@ warmup anyway: ``vllm_sail.model_executor.warmup.deep_gemm_warmup`` exercises
 the PPU DeepGEMM wrapper's int8/bf16/fp4 grouped GEMMs and its tuned-config
 lookup, none of which CUDA's warmup reaches.
 
-The in-tree fork edits ``kernel_warmup`` to swap both the import and the gate.
-Here the patch delegates: the upstream body runs unchanged (its DeepGEMM block
-stays inert on PPU for the capability reason above), and the PPU warmup is
-appended with the fork's gate — never when ``VLLM_DEEP_GEMM_WARMUP=skip``,
+PPU shares CUDA identity but cannot compile CuTeDSL. Before delegating to
+upstream, discard CuTeDSL registrations and guard the legacy warmup provider
+and its imported alias. Other registered JIT kernels retain their warmup.
+The PPU DeepGEMM warmup is appended with the fork's gate — never when
+``VLLM_DEEP_GEMM_WARMUP=skip``,
 only when the PPU DeepGEMM wrapper reports support, and only when at least one
 of the MoE / dense backend selectors still allows DeepGEMM.
 
@@ -35,6 +36,30 @@ from vllm_sail.patch.utils import patch
 logger = init_logger(__name__)
 
 _MODULE = "vllm.model_executor.warmup.kernel_warmup"
+_CUTEDSL_MODULE = "vllm.model_executor.warmup.cutedsl_warmup"
+
+
+def _exclude_ppu_cutedsl_registrations(worker) -> None:
+    from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import (
+        VllmCuTeDSLJitKernel,
+    )
+
+    registry = getattr(worker.model_runner, "jit_warmup_registry", None)
+    if registry is None:
+        return
+    # vLLM 0.30 has no public backend filter. Keep the existing mapping and
+    # registration arguments for every supported kernel; remove only CuTeDSL.
+    registrations = registry._registrations
+    unsupported = [
+        kernel for kernel in registrations if isinstance(kernel, VllmCuTeDSLJitKernel)
+    ]
+    for kernel in unsupported:
+        del registrations[kernel]
+    if unsupported:
+        logger.warning(
+            "Skipping unsupported CuTeDSL JIT warmup on PPU: %s",
+            ", ".join(type(kernel).__name__ for kernel in unsupported),
+        )
 
 
 def _ppu_deep_gemm_warmup_enabled() -> bool:
@@ -66,11 +91,33 @@ except ImportError as exc:
         exc,
     )
 else:
+    _upstream_cutedsl_warmup = importlib.import_module(_CUTEDSL_MODULE).cutedsl_warmup
+
+    @patch(
+        _MODULE,
+        "cutedsl_warmup",
+        reason="Rebind the preloaded legacy CuTeDSL warmup alias to the PPU guard.",
+        affected_versions=">=0.30.0,<0.31.0",
+        remove_when="The legacy CuTeDSL warmup gates execution on backend capabilities.",
+    )
+    @patch(
+        _CUTEDSL_MODULE,
+        "cutedsl_warmup",
+        reason="Legacy CuTeDSL warmup checks is_cuda(), which also accepts PPU.",
+        affected_versions=">=0.30.0,<0.31.0",
+        remove_when="The legacy CuTeDSL warmup gates execution on backend capabilities.",
+    )
+    def cutedsl_warmup() -> None:
+        from vllm.platforms import current_platform
+
+        if not current_platform.is_ppu():
+            return _upstream_cutedsl_warmup()
 
     @patch(
         _MODULE,
         "kernel_warmup",
         reason=(
+            "Exclude unsupported CuTeDSL JIT registrations on PPU. "
             "Upstream's DeepGEMM warmup is gated on support_deep_gemm() "
             "(sm90/sm100/sm120), so it never runs on PPU; and CUDA's warmup "
             "would not exercise the PPU DeepGEMM wrapper's kernels or tuned "
@@ -85,9 +132,11 @@ else:
         ),
     )
     def kernel_warmup(worker, *, process_local_only: bool = False):
-        result = _upstream_kernel_warmup(worker, process_local_only=process_local_only)
-
         from vllm.platforms import current_platform
+
+        if current_platform.is_ppu():
+            _exclude_ppu_cutedsl_registrations(worker)
+        result = _upstream_kernel_warmup(worker, process_local_only=process_local_only)
 
         if process_local_only or not current_platform.is_ppu():
             return result

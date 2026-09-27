@@ -51,8 +51,75 @@ def _source_root():
 
 
 @pytest.mark.parametrize(
+    "relative,name",
+    [
+        (
+            "vllm_sail/models/deepseek_v4/quant_config.py",
+            "DeepseekV4FP8Config.get_quant_method",
+        ),
+        (
+            "vllm_sail/patch/enhancement/mxfp4.py",
+            "install._get_quant_method",
+        ),
+        (
+            "vllm_sail/patch/enhancement/compressed_tensors_ppu.py",
+            "install._is_fp8_channelwise_layer",
+        ),
+    ],
+)
+def test_channelwise_matching_with_upstream_fused_layers(relative, name):
+    matcher = _function(
+        _source_root() / "vllm/model_executor/layers/quantization/utils/quant_utils.py",
+        "is_layer_skipped",
+        {"MappingProxyType": dict},
+    )
+    node = _definition(ROOT / relative, name)
+    call = next(
+        n
+        for n in ast.walk(node)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Name)
+        and n.func.id == "is_layer_skipped"
+        and any(
+            isinstance(kw.value, ast.Attribute)
+            and kw.value.attr == "fp8_channelwise_layers"
+            for kw in n.keywords
+        )
+    )
+    expression = compile(ast.Expression(call), relative, "eval")
+    config = SimpleNamespace(
+        fp8_channelwise_layers=["attn.wq_a", "attn.wkv"],
+        packed_modules_mapping={"fused_wqa_wkv": ["wq_a", "wkv"]},
+    )
+    namespace = {"self": config, "is_layer_skipped": matcher}
+    for prefix in (
+        "model.layers.0.attn.fused_wqa_wkv",
+        "model.mtp.1.attn.fused_wqa_wkv",
+    ):
+        namespace.update(prefix=prefix, layer_name=prefix)
+        assert eval(expression, namespace)
+    config.fp8_channelwise_layers = ["attn.unrelated"]
+    assert not eval(expression, namespace)
+    config.fp8_channelwise_layers = ["attn.wq_a"]
+    with pytest.raises(ValueError, match="some but not all shards"):
+        eval(expression, namespace)
+
+
+@pytest.mark.parametrize(
     "local,local_name,upstream,upstream_name",
     [
+        (
+            "models/deepseek_v4_compressor",
+            "__init__",
+            "models/deepseek_v4/compressor",
+            "DeepseekCompressor.__init__",
+        ),
+        (
+            "dense",
+            "dispatch_unquantized_gemm",
+            "model_executor/layers/utils",
+            "dispatch_unquantized_gemm",
+        ),
         (
             "attention/fa_utils",
             "get_flash_attn_version",
@@ -148,6 +215,70 @@ def test_replacements_accept_current_upstream_keywords(
         assert replacement.args.kwarg is not None
     if original.args.vararg is not None:
         assert replacement.args.vararg is not None
+
+
+@pytest.mark.parametrize("is_ppu", [False, True])
+@pytest.mark.parametrize(
+    "args,kwargs,expected_backend",
+    [
+        ((), {}, "auto"),
+        (("auto",), {}, "auto"),
+        (("torch",), {}, "torch"),
+        ((), {"linear_backend": "flashinfer_cublas"}, "flashinfer_cublas"),
+    ],
+)
+def test_dense_dispatch_accepts_and_preserves_linear_backend(
+    is_ppu, args, kwargs, expected_backend
+):
+    ppu_gemm, upstream_gemm = object(), object()
+    calls = []
+
+    def original(linear_backend="auto"):
+        calls.append(linear_backend)
+        return upstream_gemm
+
+    dispatch = _function(
+        "vllm_sail/patch/enhancement/dense.py",
+        "dispatch_unquantized_gemm",
+        {
+            "current_platform": SimpleNamespace(is_ppu=lambda: is_ppu),
+            "ppu_unquantized_gemm": ppu_gemm,
+            "_original": original,
+        },
+    )
+
+    assert dispatch(*args, **kwargs) is (ppu_gemm if is_ppu else upstream_gemm)
+    assert calls == ([] if is_ppu else [expected_backend])
+
+
+@pytest.mark.parametrize("linear_backend", [None, "auto", "torch"])
+def test_upstream_unquantized_linear_init_accepts_ppu_dispatch(linear_backend):
+    """Run the real upstream constructor that compressed-tensors calls first."""
+    ppu_gemm = object()
+    namespace = {
+        "current_platform": SimpleNamespace(is_ppu=lambda: True),
+        "ppu_unquantized_gemm": ppu_gemm,
+        "get_current_vllm_config_or_none": lambda: (
+            None
+            if linear_backend is None
+            else SimpleNamespace(
+                kernel_config=SimpleNamespace(linear_backend=linear_backend)
+            )
+        ),
+    }
+    _function(
+        "vllm_sail/patch/enhancement/dense.py",
+        "dispatch_unquantized_gemm",
+        namespace,
+    )
+    init = _function(
+        _source_root() / "vllm/model_executor/layers/linear.py",
+        "UnquantizedLinearMethod.__init__",
+        namespace,
+    )
+    method = SimpleNamespace()
+    init(method)
+    assert method._gemm_impl is ppu_gemm
 
 
 def test_fa4_probe_does_not_load_sdk(monkeypatch):

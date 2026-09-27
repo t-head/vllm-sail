@@ -152,6 +152,7 @@ def test_kernel_warmup_delegates_off_ppu_and_runs_ppu_warmup_on_ppu(
         lambda worker, **kwargs: calls.append("upstream"),
     )
     worker = types.SimpleNamespace(
+        model_runner=types.SimpleNamespace(),
         get_model=lambda: calls.append("get_model") or object(),
         scheduler_config=types.SimpleNamespace(max_num_batched_tokens=512),
     )
@@ -190,6 +191,46 @@ def test_kernel_warmup_delegates_off_ppu_and_runs_ppu_warmup_on_ppu(
     calls.clear()
     kw_patch.kernel_warmup(worker, process_local_only=True)
     assert calls == ["upstream"]
+
+
+def test_kernel_warmup_filters_real_jit_registry(monkeypatch, installed):
+    from types import SimpleNamespace
+
+    import vllm.distributed
+    from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry, VllmJitKernel
+    from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import (
+        VllmCuTeDSLJitKernel,
+    )
+
+    from vllm_sail.patch.enhancement.kernel_warmup import (
+        _exclude_ppu_cutedsl_registrations,
+    )
+
+    calls = []
+
+    class UnsupportedKernel(VllmCuTeDSLJitKernel):
+        def get_warmup_keys(self):
+            pytest.fail("PPU must exclude CuTeDSL before expanding compile keys")
+
+        def warmup_inputs(self, compile_key):
+            pytest.fail("PPU must never prepare CuTeDSL compilation")
+
+    class SupportedKernel(VllmJitKernel):
+        def get_warmup_keys(self, *, head_dim):
+            return [head_dim]
+
+        def compile(self, compile_key):
+            calls.append(compile_key)
+
+    registry = JitWarmupRegistry(SimpleNamespace())
+    with registry.activate():
+        UnsupportedKernel().register_warmup()
+        SupportedKernel().register_warmup(head_dim=128)
+    worker = SimpleNamespace(model_runner=SimpleNamespace(jit_warmup_registry=registry))
+    _exclude_ppu_cutedsl_registrations(worker)
+    monkeypatch.setattr(vllm.distributed, "is_global_first_rank", lambda: False)
+    registry.warmup()
+    assert calls == [128]
 
 
 # ---------------------------------------------------------------------------

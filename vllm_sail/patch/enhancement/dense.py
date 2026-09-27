@@ -61,10 +61,10 @@ _original = _utils.dispatch_unquantized_gemm
 
 
 @patch(_utils.__name__, "dispatch_unquantized_gemm", **_META)
-def dispatch_unquantized_gemm():
+def dispatch_unquantized_gemm(linear_backend: str = "auto"):
     if current_platform.is_ppu():
         return ppu_unquantized_gemm
-    return _original()
+    return _original(linear_backend)
 
 
 _CONSUMERS = [

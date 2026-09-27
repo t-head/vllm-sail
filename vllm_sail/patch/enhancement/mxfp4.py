@@ -238,7 +238,7 @@ def install() -> None:
                 prefix=prefix,
                 ignored_layers=self.fp8_channelwise_layers,
                 fused_mapping=self.packed_modules_mapping,
-                skip_with_substr=True,
+                match_mode="substring",
             )
         ):
             from compressed_tensors.quantization import (

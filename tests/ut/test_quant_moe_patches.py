@@ -168,7 +168,7 @@ def test_every_patch_call_carries_metadata(leaf_module) -> None:
     decorated_calls = [
         decorator
         for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
         for decorator in node.decorator_list
         if isinstance(decorator, ast.Call) and _callee_name(decorator) == "patch"
     ]
@@ -578,9 +578,9 @@ def _build_ct_stubs(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     state["ct_fp8"] = ct_fp8
 
     def is_layer_skipped(
-        prefix, ignored_layers, fused_mapping=None, skip_with_substr=False
+        prefix, ignored_layers, fused_mapping=None, *, match_mode="exact"
     ):
-        if skip_with_substr:
+        if match_mode == "substring":
             return any(needle in prefix for needle in ignored_layers)
         return prefix in ignored_layers
 

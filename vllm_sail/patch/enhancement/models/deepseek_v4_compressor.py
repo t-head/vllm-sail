@@ -12,6 +12,160 @@ from vllm_sail.patch.bodies import bind_body
 from vllm_sail.patch.utils import patch
 
 
+# fmt: off
+def __init__(
+    self,
+    vllm_config: VllmConfig,
+    compress_ratio: int,
+    hidden_size: int,
+    head_dim: int,
+    rotate: bool = False,
+    prefix: str = "",
+    k_cache_prefix="",
+    use_fp4_cache: bool = False,
+):
+    # PPU MODIFICATION: begin - copied methods need an explicit super target.
+    super(DeepseekCompressor, self).__init__()
+    # PPU MODIFICATION: end
+    self.compress_ratio = compress_ratio
+    self.hidden_size = hidden_size
+    self.head_dim = head_dim
+    self.rotate = rotate
+    self.prefix = prefix
+    self.k_cache_prefix = k_cache_prefix
+    self.use_fp4_cache = use_fp4_cache
+
+    config = vllm_config.model_config.hf_config
+    self.rope_head_dim = config.qk_rope_head_dim
+    self.nope_head_dim = self.head_dim - self.rope_head_dim
+    self.rms_norm_eps = config.rms_norm_eps
+    self.device = current_platform.device_type
+    self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+    self.max_model_len = vllm_config.model_config.max_model_len
+
+    self.overlap = compress_ratio == 4
+    self.coff = 1 + self.overlap
+
+    # The head=512 cr>=128 no-overlap deep gather uses the two-stage
+    # compressor, which needs an fp32 scratch [max_batched, 512] for
+    # the intermediate compressed_kv.
+    # Currently only tested on ROCm
+    self._use_two_stage_fused_compressor = (
+        _prefer_two_stage_compressor() and head_dim == 512 and not self.overlap
+    )
+    self.max_num_batched_tokens = (
+        vllm_config.scheduler_config.max_num_batched_tokens
+    )
+    self._compress_scratch: torch.Tensor | None = None
+    if self._use_two_stage_fused_compressor:
+        self._compress_scratch = torch.empty(
+            self.max_num_batched_tokens,
+            self.head_dim,
+            dtype=torch.float32,
+            device=self.device,
+        )
+
+    state_dtype = torch.float32
+    self.ape = nn.Parameter(
+        torch.empty(
+            (compress_ratio, self.coff * self.head_dim),
+            dtype=state_dtype,
+            device=self.device,
+        ),
+        requires_grad=False,
+    )
+
+    self.fused_wkv_wgate = MergedColumnParallelLinear(
+        self.hidden_size,
+        [self.coff * self.head_dim, self.coff * self.head_dim],
+        bias=False,
+        return_bias=False,
+        quant_config=None,
+        disable_tp=True,
+        prefix=f"{prefix}.fused_wkv_wgate",
+    )
+    self.norm = RMSNorm(self.head_dim, self.rms_norm_eps)
+
+    self.state_cache = CompressorStateCache(
+        state_dim=2 * self.coff * self.head_dim,  # kv_state + score_state
+        dtype=state_dtype,
+        compress_ratio=compress_ratio,
+        prefix=f"{prefix}.state_cache",
+    )
+
+    # Save reference to static_forward_context for forward-time KV cache lookup.
+    # get_current_vllm_config() is only available during __init__, not forward.
+    self._static_forward_context = (
+        vllm_config.compilation_config.static_forward_context
+    )
+
+    if self.head_dim == 512:
+        assert not use_fp4_cache, (
+            "MXFP4 cache is only supported for indexer (head=128)"
+        )
+        self._quant_block = 64
+        self._token_stride = self.nope_head_dim + self.rope_head_dim * 2
+        self._scale_dim = self.nope_head_dim // 64 + 1  # 7 real + 1 pad
+    elif self.head_dim == 128:
+        if use_fp4_cache:
+            self._quant_block = MXFP4_BLOCK_SIZE
+            self._token_stride = self.head_dim // 2
+            self._scale_dim = self.head_dim // MXFP4_BLOCK_SIZE
+        else:
+            self._quant_block = 128
+            self._token_stride = self.head_dim
+            self._scale_dim = 4  # single float32 scale
+    else:
+        raise ValueError(
+            f"Unsupported head_dim for fused quant+cache: {self.head_dim}"
+        )
+
+    if vllm_config.kernel_config.enable_jit_warmup:
+        _SAVE_PARTIAL_STATES_KERNEL.register_warmup(
+            head_dim=self.head_dim,
+            compress_ratio=self.compress_ratio,
+        )
+        # PPU MODIFICATION: begin - CUDA identity does not imply CuTeDSL support.
+        if (
+            current_platform.is_cuda()
+            and not current_platform.is_ppu()
+            and self.head_dim == 512
+        ):
+            # PPU MODIFICATION: end
+            from vllm.models.deepseek_v4.nvidia.ops.sparse_attn_compress_cutedsl import (  # noqa: E501
+                _SPARSE_ATTN_COMPRESS_C128_BLOCK8_KERNEL,
+                _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_C4_KERNEL,
+                _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_FULL_C4_KERNEL,
+                _SPARSE_ATTN_NORM_ROPE_STORE_FULL_KERNEL,
+                _SPARSE_ATTN_NORM_ROPE_STORE_KERNEL,
+            )
+
+            store_full_kv = vllm_config.cache_config.cache_dtype != "fp8_ds_mla"
+            if self.compress_ratio == 4:
+                (
+                    _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_FULL_C4_KERNEL
+                    if store_full_kv
+                    else _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_C4_KERNEL
+                ).register_warmup()
+            else:
+                _SPARSE_ATTN_COMPRESS_C128_BLOCK8_KERNEL.register_warmup()
+                if store_full_kv:
+                    _SPARSE_ATTN_NORM_ROPE_STORE_FULL_KERNEL.register_warmup()
+                else:
+                    _SPARSE_ATTN_NORM_ROPE_STORE_KERNEL.register_warmup(
+                        vllm_config,
+                        k_cache_prefix=self.k_cache_prefix,
+                        compress_ratio=self.compress_ratio,
+                    )
+        else:
+            from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (  # noqa: E501
+                _FUSED_KV_COMPRESS_NORM_ROPE_INSERT_INDEXER_TRITON_KERNEL,
+            )
+
+            _FUSED_KV_COMPRESS_NORM_ROPE_INSERT_INDEXER_TRITON_KERNEL.register_warmup()
+# fmt: on
+
+
 def forward(
     self,
     # [num_tokens, 2 * self.coff * self.head_dim]
@@ -175,3 +329,16 @@ patch(
     affected_versions=">=0.30.0,<0.31.0",
     remove_when="DeepseekCompressor selects compression through a backend capability hook.",
 )(bind_body(forward, _compressor))
+
+
+patch(
+    "vllm.models.deepseek_v4.compressor",
+    "DeepseekCompressor.__init__",
+    reason=(
+        "The constructor registers head-512 CuTeDSL warmup based only on CUDA "
+        "identity, bypassing has_cutedsl and the PPU forward guard. PPU must "
+        "register the common Triton warmup instead."
+    ),
+    affected_versions=">=0.30.0,<0.31.0",
+    remove_when="DeepseekCompressor gates warmup registration on backend capabilities.",
+)(bind_body(__init__, _compressor))
