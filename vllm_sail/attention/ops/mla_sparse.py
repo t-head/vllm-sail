@@ -105,7 +105,6 @@ def ppu_sparse_attn_indexer(
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
-    fp8_dtype = current_platform.fp8_dtype()
     q_dtype = q_quant.dtype
     k_cache_prefix = _resolve_layer_name(k_cache_prefix)
 

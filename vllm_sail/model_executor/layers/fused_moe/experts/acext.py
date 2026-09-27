@@ -25,9 +25,10 @@ logger = init_logger(__name__)
 
 
 # Acext availability check
-if current_platform.is_ppu() and current_platform.is_device_capability((8,0)):
+if current_platform.is_ppu() and current_platform.is_device_capability((8, 0)):
     try:
         from acext import fusedmoe_wrapper, get_enum_from_booleans
+
         _ACEXT_AVAILABLE = True
     except ImportError:
         _ACEXT_AVAILABLE = False
@@ -131,8 +132,8 @@ class AcextExperts(mk.FusedMoEExpertsModular):
         Returns minimal workspace shapes.
         """
         # PPU Note (kai): Acext manages memory internally, minimal workspace needed
-        workspace1 = (0, )
-        workspace2 = (0, )
+        workspace1 = (0,)
+        workspace2 = (0,)
         output = (M, K)
         return (workspace1, workspace2, output)
 
@@ -190,10 +191,10 @@ class AcextExperts(mk.FusedMoEExpertsModular):
         )
 
         # Get status from Acext to check if it can handle this case
-        w1_scale = getattr(self.quant_config, 'w1_scale', None)
-        w2_scale = getattr(self.quant_config, 'w2_scale', None)
-        w1_zp = getattr(self.quant_config, 'w1_zp', None)
-        w2_zp = getattr(self.quant_config, 'w2_zp', None)
+        w1_scale = getattr(self.quant_config, "w1_scale", None)
+        w2_scale = getattr(self.quant_config, "w2_scale", None)
+        w1_zp = getattr(self.quant_config, "w1_zp", None)
+        w2_zp = getattr(self.quant_config, "w2_zp", None)
 
         # Call Acext fused MoE wrapper
         fusedmoe_wrapper(

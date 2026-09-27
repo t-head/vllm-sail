@@ -1,3 +1,16 @@
+minimum_pre_commit_version: "3.2.0"
+# Match vLLM's local / CI hook stages. Keep tool versions pinned here.
+default_stages: [pre-commit, manual]
+# Copied patch bodies and generated files must retain their source structure.
+# The patch framework, guides and editable upstream manifest remain checked.
+exclude: |
+  (?x)^(
+    csrc/upstream/(?!manifest\.toml$).*|
+    vllm_sail/patch/(bugfix|enhancement|performance|template)/.*|
+    vllm_sail/patch/manifest\.md|
+    vllm_sail/_version\.py
+  )$
+
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.12.11
@@ -12,4 +25,13 @@ repos:
       - id: end-of-file-fixer
       - id: trailing-whitespace
       - id: check-yaml
+      - id: check-toml
+      - id: check-json
       - id: check-merge-conflict
+
+  # Same ShellCheck distribution and revision as official vLLM.
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: 745eface02aef23e168a8afb6b5737818efbea95 # v0.11.0.1
+    hooks:
+      - id: shellcheck
+        args: [--shell=bash, --format=gcc]

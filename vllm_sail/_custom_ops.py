@@ -40,7 +40,9 @@ def _ext_loaded(name: str) -> bool:
             importlib.import_module(f"vllm_sail.{name}")
             loaded = True
         except ImportError as exc:
-            logger.info("vllm_sail.%s unavailable (%s); built without PPU_SDK?", name, exc)
+            logger.info(
+                "vllm_sail.%s unavailable (%s); built without PPU_SDK?", name, exc
+            )
             loaded = False
         _ext_state[name] = loaded
     return bool(loaded)

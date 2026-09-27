@@ -66,13 +66,19 @@ def rotary_kernel(
         COS = COS + (rm_cs[:, None] * rotary_dim_half + rk_half[None, :])
         SIN = SIN + (rm_cs[:, None] * rotary_dim_half + rk_half[None, :])
         cos = tl.load(
-            COS, mask=(rm_cs[:, None] < seqlen_ro) & (rk_half[None, :] < rotary_dim_half), other=1.0
+            COS,
+            mask=(rm_cs[:, None] < seqlen_ro) & (rk_half[None, :] < rotary_dim_half),
+            other=1.0,
         ).to(tl.float32)
         sin = tl.load(
-            SIN, mask=(rm_cs[:, None] < seqlen_ro) & (rk_half[None, :] < rotary_dim_half), other=0.0
+            SIN,
+            mask=(rm_cs[:, None] < seqlen_ro) & (rk_half[None, :] < rotary_dim_half),
+            other=0.0,
         ).to(tl.float32)
         x0 = tl.load(
-            X, mask=(rm[:, None] < seqlen) & (rk_half[None, :] < rotary_dim_half), other=0.0
+            X,
+            mask=(rm[:, None] < seqlen) & (rk_half[None, :] < rotary_dim_half),
+            other=0.0,
         ).to(tl.float32)
         x1 = tl.load(
             X + rotary_dim_half * stride_x_headdim,
@@ -84,8 +90,12 @@ def rotary_kernel(
         o0 = x0 * cos - x1 * sin
         o1 = x0 * sin + x1 * cos
         # write back result
-        OUT = OUT + (rm[:, None] * stride_out_seqlen + rk_half[None, :] * stride_out_headdim)
-        tl.store(OUT, o0, mask=(rm[:, None] < seqlen) & (rk_half[None, :] < rotary_dim_half))
+        OUT = OUT + (
+            rm[:, None] * stride_out_seqlen + rk_half[None, :] * stride_out_headdim
+        )
+        tl.store(
+            OUT, o0, mask=(rm[:, None] < seqlen) & (rk_half[None, :] < rotary_dim_half)
+        )
         tl.store(
             OUT + rotary_dim_half * stride_out_headdim,
             o1,
@@ -114,9 +124,9 @@ def rotary_kernel(
             mask=(rm_cs[:, None] < seqlen_ro) & (rk_repeat[None, :] < rotary_dim_half),
             other=0.0,
         ).to(tl.float32)
-        x0 = tl.load(X0, mask=(rm[:, None] < seqlen) & (rk[None, :] < rotary_dim), other=0.0).to(
-            tl.float32
-        )
+        x0 = tl.load(
+            X0, mask=(rm[:, None] < seqlen) & (rk[None, :] < rotary_dim), other=0.0
+        ).to(tl.float32)
         x1 = tl.load(
             X1, mask=(rm[:, None] < seqlen) & (rk_swap[None, :] < rotary_dim), other=0.0
         ).to(tl.float32)
@@ -156,7 +166,9 @@ def apply_rotary(
     if not is_varlen:
         batch, seqlen, nheads, headdim = x.shape
     else:
-        assert max_seqlen is not None, "If cu_seqlens is passed in, then max_seqlen must be passed"
+        assert max_seqlen is not None, (
+            "If cu_seqlens is passed in, then max_seqlen must be passed"
+        )
         total_seqlen, nheads, headdim = x.shape
         batch_p_1 = cu_seqlens.shape[0]
         batch = batch_p_1 - 1
@@ -168,12 +180,12 @@ def apply_rotary(
     assert headdim <= 256, "Only support headdim <= 256"
     assert seqlen_ro >= seqlen, "seqlen_ro must be >= seqlen"
 
-    assert (
-        cos.dtype == sin.dtype
-    ), f"cos and sin must have the same dtype, got {cos.dtype} and {sin.dtype}"
-    assert (
-        x.dtype == cos.dtype
-    ), f"Input and cos/sin must have the same dtype, got {x.dtype} and {cos.dtype}"
+    assert cos.dtype == sin.dtype, (
+        f"cos and sin must have the same dtype, got {cos.dtype} and {sin.dtype}"
+    )
+    assert x.dtype == cos.dtype, (
+        f"Input and cos/sin must have the same dtype, got {x.dtype} and {cos.dtype}"
+    )
 
     cos, sin = cos.contiguous(), sin.contiguous()
     if isinstance(seqlen_offsets, torch.Tensor):
@@ -208,7 +220,9 @@ def apply_rotary(
             seqlen,  # shapes
             rotary_dim,
             seqlen_ro,
-            output.stride(0) if not is_varlen else 0,  # batch_strides if not varlen else 0
+            output.stride(0)
+            if not is_varlen
+            else 0,  # batch_strides if not varlen else 0
             output.stride(-3),  # seqlen_stride or total_seqlen_stride
             output.stride(-2),  # nheads_stride
             output.stride(-1),  # headdim_stride

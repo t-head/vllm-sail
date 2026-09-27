@@ -399,11 +399,13 @@ def _backend_incompatibility_reason(
     from vllm import envs
     from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 
-    from vllm_sail.patch.enhancement.models.moe_marlin_gate import supports_marlin_layout
+    from vllm_sail.patch.enhancement.models.moe_marlin_gate import (
+        supports_marlin_layout,
+    )
 
     if may_have_zp or may_have_bias or moe_config.has_bias:
         return "PPU W4A16 does not consume zero points or expert bias"
-    if not isinstance(quant_config, (AutoGPTQConfig, QuantizationArgs)):
+    if not isinstance(quant_config, AutoGPTQConfig | QuantizationArgs):
         return "PPU W4A16 requires GPTQ or compressed-tensors symmetric INT4 weights"
     if getattr(quant_config, "desc_act", False) or getattr(
         quant_config, "actorder", None

@@ -201,7 +201,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             x, x_scales = x
             return x, x_scales
 
-        assert isinstance(x, (torch.Tensor, tuple))
+        assert isinstance(x, torch.Tensor | tuple)
         q_dtype = quant_config.quant_dtype
 
         if q_dtype == "nvfp4" and envs.VLLM_DEEPEPLL_NVFP4_DISPATCH:

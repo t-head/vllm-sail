@@ -5,8 +5,6 @@ import random
 
 import torch
 
-import vllm.envs as envs
-
 # from sglang.srt.layers.moe.ep_moe.kernels import _fwd_kernel_ep_scatter_1
 from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
     deep_gemm_block_shape,

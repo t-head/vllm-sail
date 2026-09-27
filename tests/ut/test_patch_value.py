@@ -104,9 +104,7 @@ def test_conflicting_existing_value_raises(target_module: types.ModuleType) -> N
 def test_metadata_is_mandatory(target_module: types.ModuleType, field: str) -> None:
     meta = dict(META) | {field: "   "}
     with pytest.raises(ValueError, match=field):
-        patch_value(
-            target_module.__name__, "NEW_CONST", 1, allow_missing=True, **meta
-        )
+        patch_value(target_module.__name__, "NEW_CONST", 1, allow_missing=True, **meta)
 
 
 def test_installs_unhashable_value(target_module: types.ModuleType) -> None:

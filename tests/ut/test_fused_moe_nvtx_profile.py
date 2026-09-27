@@ -57,9 +57,7 @@ TOP_K = 2
 def _make_inputs(M: int):
     """Build a small unquantized MoE problem on CUDA."""
     torch.manual_seed(42)
-    hidden_states = torch.randn(
-        M, HIDDEN, dtype=torch.bfloat16, device="cuda"
-    )
+    hidden_states = torch.randn(M, HIDDEN, dtype=torch.bfloat16, device="cuda")
     w1 = (
         torch.randn(
             NUM_EXPERTS,
@@ -83,9 +81,7 @@ def _make_inputs(M: int):
     topk_ids = torch.randint(
         0, NUM_EXPERTS, (M, TOP_K), dtype=torch.int32, device="cuda"
     )
-    topk_weights = torch.softmax(
-        torch.randn(M, TOP_K, device="cuda"), dim=-1
-    )
+    topk_weights = torch.softmax(torch.randn(M, TOP_K, device="cuda"), dim=-1)
     return hidden_states, w1, w2, topk_weights, topk_ids
 
 
@@ -104,16 +100,14 @@ def test_nvtx_branch_runs_and_matches_default(M: int, monkeypatch):
         "th_nvtx_range_push",
         lambda label: nvtx_pushed.append(label),
     )
-    monkeypatch.setattr(
-        fused_moe_module, "th_nvtx_range_pop", lambda: None
-    )
+    monkeypatch.setattr(fused_moe_module, "th_nvtx_range_pop", lambda: None)
     monkeypatch.setattr(fused_moe_module, "NVTX_PROFILE", True)
     nvtx_out = fused_experts(*inputs)
 
     # The NVTX branch of fused_experts_op must actually have run.
-    assert any(
-        label.startswith(("P_MoE", "D_MoE")) for label in nvtx_pushed
-    ), f"NVTX branch not executed, labels={nvtx_pushed}"
+    assert any(label.startswith(("P_MoE", "D_MoE")) for label in nvtx_pushed), (
+        f"NVTX branch not executed, labels={nvtx_pushed}"
+    )
 
     torch.testing.assert_close(nvtx_out, ref_out)
 
@@ -164,7 +158,5 @@ def test_nvtx_enabled_via_env_end_to_end():
     )
     if "NVTX_DISABLED" in proc.stdout:
         pytest.skip("torch.cuda.nvtx not importable in this environment")
-    assert "NVTX_OK" in proc.stdout, (
-        f"stdout={proc.stdout}\nstderr={proc.stderr}"
-    )
+    assert "NVTX_OK" in proc.stdout, f"stdout={proc.stdout}\nstderr={proc.stderr}"
     assert proc.returncode == 0, proc.stderr

@@ -76,9 +76,7 @@ class MixedPrecisionW4Config(QuantizationConfig):
 
     def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
         if self.ignored_layers:
-            self.ignored_layers = hf_to_vllm_mapper.apply_list(
-                self.ignored_layers
-            )
+            self.ignored_layers = hf_to_vllm_mapper.apply_list(self.ignored_layers)
         if self.int8_channelwise_layers:
             self.int8_channelwise_layers = hf_to_vllm_mapper.apply_list(
                 self.int8_channelwise_layers
@@ -86,77 +84,84 @@ class MixedPrecisionW4Config(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "MixedPrecisionW4Config":
-        weight_block_size = cls.get_from_keys_or(config, ["weight_block_size"],
-                                                 None)
+        weight_block_size = cls.get_from_keys_or(config, ["weight_block_size"], None)
         ignored_layers = cls.get_from_keys_or(
-            config, ["ignore", "ignored_layers", "modules_to_not_convert"],
-            None)
+            config, ["ignore", "ignored_layers", "modules_to_not_convert"], None
+        )
         int8_channelwise_layers = cls.get_from_keys_or(
-            config, ["int8_channelwise_layers"], None)
+            config, ["int8_channelwise_layers"], None
+        )
         return cls(
             weight_block_size=weight_block_size,
             ignored_layers=ignored_layers,
             int8_channelwise_layers=int8_channelwise_layers,
         )
 
-    def get_int8_channelwise_quant_method(self, layer: torch.nn.Module,
-                                          prefix: str) -> QuantizeMethodBase:
+    def get_int8_channelwise_quant_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -> QuantizeMethodBase:
         config = {
-            'config_groups': {
-                'group_0': {
-                    'input_activations': {
-                        'actorder': None,
-                        'block_structure': None,
-                        'dynamic': True,
-                        'group_size': None,
-                        'num_bits': 8,
-                        'observer': None,
-                        'observer_kwargs': {},
-                        'strategy': 'token',
-                        'symmetric': True,
-                        'type': 'int'
+            "config_groups": {
+                "group_0": {
+                    "input_activations": {
+                        "actorder": None,
+                        "block_structure": None,
+                        "dynamic": True,
+                        "group_size": None,
+                        "num_bits": 8,
+                        "observer": None,
+                        "observer_kwargs": {},
+                        "strategy": "token",
+                        "symmetric": True,
+                        "type": "int",
                     },
-                    'output_activations': None,
-                    'targets': ['Linear'],
-                    'weights': {
-                        'actorder': None,
-                        'block_structure': None,
-                        'dynamic': False,
-                        'group_size': None,
-                        'num_bits': 8,
-                        'observer': 'minmax',
-                        'observer_kwargs': {},
-                        'strategy': 'channel',
-                        'symmetric': True,
-                        'type': 'int'
-                    }
+                    "output_activations": None,
+                    "targets": ["Linear"],
+                    "weights": {
+                        "actorder": None,
+                        "block_structure": None,
+                        "dynamic": False,
+                        "group_size": None,
+                        "num_bits": 8,
+                        "observer": "minmax",
+                        "observer_kwargs": {},
+                        "strategy": "channel",
+                        "symmetric": True,
+                        "type": "int",
+                    },
                 }
             },
-            'format': 'int-quantized',
-            'global_compression_ratio': None,
-            'ignore': [],
-            'kv_cache_scheme': None,
-            'quant_method': 'compressed-tensors',
-            'quantization_status': 'compressed'
+            "format": "int-quantized",
+            "global_compression_ratio": None,
+            "ignore": [],
+            "kv_cache_scheme": None,
+            "quant_method": "compressed-tensors",
+            "quantization_status": "compressed",
         }
         return CompressedTensorsConfig.from_config(config).get_quant_method(
-            layer, prefix)
+            layer, prefix
+        )
 
-    def get_quant_method(self, layer: torch.nn.Module,
-                         prefix: str) -> QuantizeMethodBase | None:
+    def get_quant_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -> QuantizeMethodBase | None:
         if isinstance(layer, LinearBase):
-            if should_ignore_layer(prefix,
-                                   ignore=self.ignored_layers,
-                                   fused_mapping=self.packed_modules_mapping):
+            if should_ignore_layer(
+                prefix,
+                ignore=self.ignored_layers,
+                fused_mapping=self.packed_modules_mapping,
+            ):
                 return UnquantizedLinearMethod()
             if self.weight_block_size is not None:
                 raise NotImplementedError
             else:
                 return self.get_int8_channelwise_quant_method(layer, prefix)
         elif isinstance(layer, RoutedExperts):
-            if should_ignore_layer(prefix,
-                                   ignore=self.int8_channelwise_layers,
-                                   fused_mapping=self.packed_modules_mapping):
+            if should_ignore_layer(
+                prefix,
+                ignore=self.int8_channelwise_layers,
+                fused_mapping=self.packed_modules_mapping,
+            ):
                 return self.get_int8_channelwise_quant_method(layer, prefix)
             logger.info_once("Using PPU W4AInt8MoEMethod")
             return W4AInt8MoEMethod(self, layer.moe_config)
@@ -168,8 +173,7 @@ class W4AInt8MoEMethod(FusedMoEMethodBase):
     Supports INT4 weights for expert layers with TensorRT-LLM unpacking.
     """
 
-    def __init__(self, quant_config: MixedPrecisionW4Config,
-                 moe: FusedMoEConfig):
+    def __init__(self, quant_config: MixedPrecisionW4Config, moe: FusedMoEConfig):
         super().__init__(moe)
         self.quant_config = quant_config
         self.ep_size = moe.ep_size
@@ -186,10 +190,12 @@ class W4AInt8MoEMethod(FusedMoEMethodBase):
     ):
         # INT4 packed weights for w13 (gate_up_proj) - column parallel
         w13_weight = torch.nn.Parameter(
-            torch.empty(num_experts,
-                        2 * intermediate_size_per_partition,
-                        hidden_size // self.quant_config.pack_factor,
-                        dtype=torch.int8),
+            torch.empty(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                hidden_size // self.quant_config.pack_factor,
+                dtype=torch.int8,
+            ),
             requires_grad=False,
         )
         layer.register_parameter("w13_weight", w13_weight)
@@ -197,21 +203,21 @@ class W4AInt8MoEMethod(FusedMoEMethodBase):
 
         # INT4 packed weights for w2 (down_proj) - row parallel
         w2_weight = torch.nn.Parameter(
-            torch.empty(num_experts,
-                        hidden_size,
-                        intermediate_size_per_partition //
-                        self.quant_config.pack_factor,
-                        dtype=torch.int8),
+            torch.empty(
+                num_experts,
+                hidden_size,
+                intermediate_size_per_partition // self.quant_config.pack_factor,
+                dtype=torch.int8,
+            ),
             requires_grad=False,
         )
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
         w13_weight_scale = torch.nn.Parameter(
-            torch.ones(num_experts,
-                       2 * intermediate_size_per_partition,
-                       1,
-                       dtype=torch.float32),
+            torch.ones(
+                num_experts, 2 * intermediate_size_per_partition, 1, dtype=torch.float32
+            ),
             requires_grad=False,
         )
         w2_weight_scale = torch.nn.Parameter(
@@ -222,7 +228,8 @@ class W4AInt8MoEMethod(FusedMoEMethodBase):
         layer.register_parameter("w2_weight_scale", w2_weight_scale)
 
         extra_weight_attrs.update(
-            {"quant_method": FusedMoeWeightScaleSupported.CHANNEL.value})
+            {"quant_method": FusedMoeWeightScaleSupported.CHANNEL.value}
+        )
         set_weight_attrs(w13_weight_scale, extra_weight_attrs)
         set_weight_attrs(w2_weight_scale, extra_weight_attrs)
 
@@ -236,7 +243,8 @@ class W4AInt8MoEMethod(FusedMoEMethodBase):
         w13_weight = w13_weight.view(
             w13_weight_shape[0],
             w13_weight_shape[2] * self.quant_config.pack_factor,
-            w13_weight_shape[1] // self.quant_config.pack_factor)
+            w13_weight_shape[1] // self.quant_config.pack_factor,
+        )
         # [E, hidden_size, 2 * intermediate // 2]
         layer.w13_weight = torch.nn.Parameter(w13_weight, requires_grad=False)
 
@@ -245,12 +253,14 @@ class W4AInt8MoEMethod(FusedMoEMethodBase):
         w2_weight = w2_weight.view(
             w2_weight_shape[0],
             w2_weight_shape[2] * self.quant_config.pack_factor,
-            w2_weight_shape[1] // self.quant_config.pack_factor)
+            w2_weight_shape[1] // self.quant_config.pack_factor,
+        )
         # [E, intermediate, hidden_size // 2]
         layer.w2_weight = torch.nn.Parameter(w2_weight, requires_grad=False)
 
     def get_fused_moe_quant_config(
-            self, layer: torch.nn.Module) -> FusedMoEQuantConfig | None:
+        self, layer: torch.nn.Module
+    ) -> FusedMoEQuantConfig | None:
         return None
 
     def apply(
@@ -274,18 +284,34 @@ class W4AInt8MoEMethod(FusedMoEMethodBase):
 
         output = torch.empty_like(x)
         expanded_source_row_to_dest_size = pad_to_multiple_of_16(
-            num_tokens=x.shape[0], topk=topk_ids.shape[1])
-        Q_type = get_enum_from_booleans(use_fp8_w8a8=False,
-                                        use_int8_w8a8=False,
-                                        use_int8_w8a16=False,
-                                        use_int4_w4a16=False,
-                                        use_fp8_w8a16=False,
-                                        use_int8_w4a8=True)
+            num_tokens=x.shape[0], topk=topk_ids.shape[1]
+        )
+        Q_type = get_enum_from_booleans(
+            use_fp8_w8a8=False,
+            use_int8_w8a8=False,
+            use_int8_w8a16=False,
+            use_int4_w4a16=False,
+            use_fp8_w8a16=False,
+            use_int8_w4a8=True,
+        )
 
-        fusedmoe_wrapper(x, layer.w13_weight, layer.w2_weight,
-                         topk_weights, topk_ids, output,
-                         expanded_source_row_to_dest_size,
-                         layer.w13_weight_scale, layer.w2_weight_scale,
-                         None, None, None, None, self.ep_rank, self.ep_size, Q_type)
+        fusedmoe_wrapper(
+            x,
+            layer.w13_weight,
+            layer.w2_weight,
+            topk_weights,
+            topk_ids,
+            output,
+            expanded_source_row_to_dest_size,
+            layer.w13_weight_scale,
+            layer.w2_weight_scale,
+            None,
+            None,
+            None,
+            None,
+            self.ep_rank,
+            self.ep_size,
+            Q_type,
+        )
 
         return output
