@@ -66,6 +66,8 @@ def _make_deepseek_v4_weights_mapper(
         },
         orig_to_new_substr={
             ".shared_experts.w2": ".shared_experts.down_proj",
+            # Draft weights are loaded separately by the MTP/DSpark model.
+            "mtp.": None,
         },
     )
 

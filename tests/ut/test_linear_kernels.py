@@ -13,6 +13,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import textwrap
+from importlib.metadata import PackageNotFoundError, distribution
 
 import pytest
 
@@ -66,6 +67,10 @@ def test_registration_precedes_general_patches_and_optional_sdk_loading(
     """Direct registry imports must work in a fresh installed-wheel process."""
     pytest.importorskip("torch")
     pytest.importorskip("vllm")
+    try:
+        distribution("vllm-sail")
+    except PackageNotFoundError:
+        pytest.skip("requires an installed vllm-sail distribution")
     result = subprocess.run(
         [
             sys.executable,

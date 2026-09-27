@@ -34,12 +34,17 @@ _PRELOADED_FLASHMLA_BACKEND = importlib.import_module(
 
 @pytest.fixture(scope="module")
 def installed():
+    # The platform entry point installs the FA shim before the general hook.
+    # Direct patch.install() alone does not reproduce that startup sequence.
+    import vllm_sail
+
+    vllm_sail.register()
     patch_pkg.install()
     return PATCH_REGISTRY
 
 
 def _unwrap(attribute):
-    if isinstance(attribute, (staticmethod, classmethod)):
+    if isinstance(attribute, staticmethod | classmethod):
         return attribute.__func__
     if isinstance(attribute, property):
         return attribute.fget
@@ -89,13 +94,16 @@ _ATTENTION_TARGETS = (
     ),
     (
         "vllm.model_executor.layers.attention.mla_attention",
-        "MLACommonBaseImpl._compute_prefill_context",
+        "_get_kv_b_proj_input_dtype",
     ),
     (
         "vllm.v1.attention.backends.mla.indexer",
         "get_paged_mqa_logits_metadata",
     ),
-    ("vllm.v1.attention.backends.mla.indexer", "split_indexer_prefill_chunks"),
+    (
+        "vllm.v1.attention.backends.mla.indexer",
+        "DeepseekV32IndexerMetadataBuilder._split_indexer_prefill_chunks",
+    ),
     (
         "vllm.v1.attention.backends.mla.indexer",
         "DeepseekV32IndexerMetadataBuilder.__init__",
@@ -119,15 +127,7 @@ _ATTENTION_TARGETS = (
     ),
     (
         "vllm.model_executor.kernels.mhc.tilelang",
-        "mhc_pre_tilelang",
-    ),
-    (
-        "vllm.model_executor.kernels.mhc.tilelang",
-        "mhc_pre_broadcast_tilelang",
-    ),
-    (
-        "vllm.model_executor.kernels.mhc.tilelang",
-        "mhc_fused_post_pre_tilelang",
+        "_hc_prenorm_gemm_outputs",
     ),
     ("vllm.v1.kv_cache_interface", "MLAAttentionSpec.__init__"),
     ("vllm.v1.kv_cache_interface", "MLAAttentionSpec.merge"),
@@ -420,17 +420,22 @@ def test_mla_attention_spec_merge_forwards_indexer_geometry(installed) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_mhc_tilelang_bodies_rebased_onto_target_module(installed) -> None:
-    """The verbatim launcher bodies must resolve free names like upstream."""
+def test_mhc_launchers_use_shared_prenorm_helper(installed) -> None:
     tilelang = importlib.import_module("vllm.model_executor.kernels.mhc.tilelang")
+    assert getattr(tilelang._hc_prenorm_gemm_outputs, PATCH_MARKER, None)
     for name in (
         "mhc_pre_tilelang",
         "mhc_pre_broadcast_tilelang",
         "mhc_fused_post_pre_tilelang",
     ):
         fn = getattr(tilelang, name)
-        assert getattr(fn, PATCH_MARKER, None), name
-        assert fn.__globals__ is tilelang.__dict__, name
+        assert (
+            fn.__globals__["_hc_prenorm_gemm_outputs"]
+            is tilelang._hc_prenorm_gemm_outputs
+        )
+        assert not getattr(fn, PATCH_MARKER, None), (
+            "Upstream retains ownership of launchers"
+        )
 
 
 def test_phase4_metadata_shape(installed) -> None:
@@ -450,7 +455,7 @@ def test_phase4_metadata_shape(installed) -> None:
     ]
     assert len(records) >= 30, [r.target for r in records]
     for record in records:
-        assert record.affected_versions == ">=0.27.0,<0.28.0", record.target
+        assert record.affected_versions == ">=0.30.0,<0.31.0", record.target
         assert record.reason.strip(), record.target
         assert record.remove_when.strip(), record.target
         assert record.remove_when.strip().lower() != "todo", record.target

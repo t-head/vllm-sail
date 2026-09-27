@@ -46,8 +46,8 @@ quoting prevents the shell from interpreting the semicolon as a command boundary
 
 Install a vLLM build with `VLLM_TARGET_DEVICE=empty` in the same environment.
 This lets the PPU plugin provide the native operations used by the engine.
-The plugin accepts `>=0.27.0,<0.28.0`; its generated upstream kernel sources use
-**v0.27.1** as the reproducible source baseline.
+The plugin accepts `>=0.30.0,<0.31.0`; its generated upstream kernel sources use
+**v0.30.0** as the reproducible source baseline.
 
 Use a matching wheel supplied with your PPU environment, or build that upstream
 release from source. For a source build, first prepare vLLM's build and runtime

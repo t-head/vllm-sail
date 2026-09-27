@@ -135,17 +135,17 @@ def test_compressor_uses_supported_kernel(modules, ppu, head, two_stage, expecte
         Any=object,
         CUDAGraphMode=types.SimpleNamespace(FULL="full"),
         torch=types.SimpleNamespace(uint8="u8", float8_e4m3fn="fp8"),
-        save_partial_states=kernel("save"),
+        _SAVE_PARTIAL_STATES_KERNEL=kernel("save"),
         compress_norm_rope_store_triton=kernel("triton"),
         compress_norm_rope_store_two_stage_triton=kernel("two_stage"),
     )
     if not ppu:
         modules(
             f"{base}.nvidia.ops.sparse_attn_compress_cutedsl",
-            compress_norm_rope_store_cutedsl=kernel("cute"),
+            _SPARSE_ATTN_COMPRESSOR_CUTEDSL_KERNEL=kernel("cute"),
         )
     load_patch("vllm_sail/patch/enhancement/models/deepseek_v4_compressor.py")
-    obj = cls()
+    obj = cls.__new__(cls)
     obj.__dict__.update(
         coff=2,
         head_dim=head,
@@ -186,6 +186,172 @@ def test_compressor_uses_supported_kernel(modules, ppu, head, two_stage, expecte
     calls.clear()
     obj.forward(scores, object(), object())
     assert not calls
+
+
+@pytest.mark.parametrize("ppu", [True, False])
+@pytest.mark.parametrize("head,ratio", [(512, 4), (512, 128), (128, 4)])
+@pytest.mark.parametrize("warmup", [True, False])
+@pytest.mark.parametrize("cache_dtype", ["fp8_ds_mla", "bf16"])
+def test_compressor_constructor_registers_supported_warmup(
+    modules, ppu, head, ratio, warmup, cache_dtype
+):
+    base = "vllm.models.deepseek_v4"
+    calls = []
+
+    def kernel(name):
+        return types.SimpleNamespace(register_warmup=lambda *a, **k: calls.append(name))
+
+    def noop(*a, **k):
+        return object()
+
+    cls = type("DeepseekCompressor", (), {"forward": noop})
+    provider = modules(
+        f"{base}.compressor",
+        DeepseekCompressor=cls,
+        current_platform=types.SimpleNamespace(
+            device_type="cuda", is_cuda=lambda: True, is_ppu=lambda: ppu
+        ),
+        torch=types.SimpleNamespace(empty=noop, float32="fp32"),
+        nn=types.SimpleNamespace(Parameter=noop),
+        _prefer_two_stage_compressor=lambda: False,
+        MergedColumnParallelLinear=noop,
+        RMSNorm=noop,
+        CompressorStateCache=noop,
+        _SAVE_PARTIAL_STATES_KERNEL=kernel("save"),
+    )
+    modules(
+        f"{base}.common.ops.fused_compress_quant_cache",
+        _FUSED_KV_COMPRESS_NORM_ROPE_INSERT_INDEXER_TRITON_KERNEL=kernel("triton"),
+    )
+    # On PPU the CuTeDSL module is deliberately unavailable: even importing it
+    # during construction is a regression, regardless of the forward guard.
+    if not ppu:
+        modules(
+            f"{base}.nvidia.ops.sparse_attn_compress_cutedsl",
+            _SPARSE_ATTN_COMPRESS_C128_BLOCK8_KERNEL=kernel("cute128"),
+            _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_C4_KERNEL=kernel("cute4"),
+            _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_FULL_C4_KERNEL=kernel("cute4full"),
+            _SPARSE_ATTN_NORM_ROPE_STORE_FULL_KERNEL=kernel("cutestorefull"),
+            _SPARSE_ATTN_NORM_ROPE_STORE_KERNEL=kernel("cutestore"),
+        )
+    load_patch("vllm_sail/patch/enhancement/models/deepseek_v4_compressor.py")
+    ns = types.SimpleNamespace
+    config = ns(
+        model_config=ns(
+            hf_config=ns(qk_rope_head_dim=64, rms_norm_eps=1e-6), max_model_len=1024
+        ),
+        scheduler_config=ns(max_num_seqs=4, max_num_batched_tokens=64),
+        compilation_config=ns(static_forward_context={}),
+        kernel_config=ns(enable_jit_warmup=warmup),
+        cache_config=ns(cache_dtype=cache_dtype),
+    )
+    obj = cls(config, ratio, 256, head)
+    assert obj.__init__.__func__.__globals__ is provider.__dict__
+    if not warmup:
+        assert calls == []
+    elif ppu or head != 512:
+        assert calls == ["save", "triton"]
+    elif ratio == 4:
+        assert calls == [
+            "save",
+            "cute4" if cache_dtype == "fp8_ds_mla" else "cute4full",
+        ]
+    else:
+        assert calls == [
+            "save",
+            "cute128",
+            "cutestore" if cache_dtype == "fp8_ds_mla" else "cutestorefull",
+        ]
+
+
+@pytest.mark.parametrize("ppu", [True, False])
+@pytest.mark.parametrize("process_local_only", [True, False])
+@pytest.mark.parametrize("jit_enabled", [True, False])
+def test_warmup_excludes_cutedsl_only_on_ppu(
+    modules, ppu, process_local_only, jit_enabled
+):
+    ns = types.SimpleNamespace
+    calls = []
+    modules("vllm.platforms", current_platform=ns(is_ppu=lambda: ppu))
+    modules("vllm.logger", init_logger=lambda _: ns(warning=lambda *a: None))
+
+    class VllmCuTeDSLJitKernel:
+        def compile_many(self, keys):
+            assert not ppu, "CuTeDSL compilation reached PPU"
+            calls.append("cute")
+
+    class CuTeKernel(VllmCuTeDSLJitKernel):
+        pass
+
+    class TritonKernel:
+        def compile_many(self, keys):
+            calls.append("triton")
+
+    modules(
+        "vllm.model_executor.warmup.jit_warmup_cutedsl_helper",
+        VllmCuTeDSLJitKernel=VllmCuTeDSLJitKernel,
+    )
+    cute, triton = CuTeKernel(), TritonKernel()
+    registrations = {cute: [((), {})], triton: [((), {"head_dim": 128})]}
+    retained = registrations[triton]
+    worker = ns(
+        model_runner=ns(jit_warmup_registry=ns(_registrations=registrations)),
+        vllm_config=ns(
+            kernel_config=ns(enable_jit_warmup=jit_enabled, enable_cutedsl_warmup=True)
+        ),
+        get_model=lambda: "model",
+        scheduler_config=ns(max_num_batched_tokens=64),
+    )
+
+    def legacy():
+        assert not ppu, "Legacy CuTeDSL warmup reached PPU"
+        calls.append("legacy")
+
+    legacy_module = modules(
+        "vllm.model_executor.warmup.cutedsl_warmup", cutedsl_warmup=legacy
+    )
+
+    def upstream(actual_worker, *, process_local_only=False):
+        assert actual_worker is worker
+        calls.append(("upstream", process_local_only))
+        if worker.vllm_config.kernel_config.enable_jit_warmup:
+            for kernel, keys in registrations.items():
+                kernel.compile_many(keys)
+        provider.cutedsl_warmup()
+        return "result"
+
+    # The consumer imported the function by value before the patch was loaded.
+    provider = modules(
+        "vllm.model_executor.warmup.kernel_warmup",
+        kernel_warmup=upstream,
+        cutedsl_warmup=legacy,
+    )
+    modules(
+        "vllm_sail.model_executor.warmup.deep_gemm_warmup",
+        deep_gemm_warmup=lambda model, size: calls.append((model, size)),
+    )
+    patched = load_patch("vllm_sail/patch/enhancement/kernel_warmup.py")
+    patched._ppu_deep_gemm_warmup_enabled = lambda: True
+    assert (
+        provider.kernel_warmup(worker, process_local_only=process_local_only)
+        == "result"
+    )
+    expected = [("upstream", process_local_only)]
+    if jit_enabled:
+        expected += ["triton"] if ppu else ["cute", "triton"]
+    if not ppu:
+        expected += ["legacy"]
+    elif not process_local_only:
+        expected += [("model", 64)]
+    assert calls == expected
+    assert registrations[triton] is retained
+    assert (cute in registrations) is (not ppu)
+    assert worker.vllm_config.kernel_config.enable_jit_warmup is jit_enabled
+    assert worker.vllm_config.kernel_config.enable_cutedsl_warmup is True
+    assert legacy_module.cutedsl_warmup is provider.cutedsl_warmup
+    calls.clear()
+    legacy_module.cutedsl_warmup()
+    assert calls == ([] if ppu else ["legacy"])
 
 
 @pytest.mark.parametrize(
@@ -331,6 +497,10 @@ def test_input_batch_reinitializes_when_only_context_length_changes(modules):
     runner = cls()
     runner.__dict__.update(
         max_model_len=8192,
+        cp_kv_cache_interleave_size=1,
+        jit_warmup_registry=types.SimpleNamespace(
+            activate=__import__("contextlib").nullcontext
+        ),
         max_encoder_len=0,
         _init_block_sizes=[],
         _init_kernel_block_sizes=[],
@@ -441,8 +611,9 @@ def test_deepseek_config_preserves_dense_channelwise_patterns_for_mtp(modules):
         (None, None, (False, False, False)),
     ],
 )
+@pytest.mark.parametrize("explicit_manager", [False, True])
 def test_deepep_factory_uses_bound_globals_and_quantized_protocol(
-    modules, quant_dtype, block, expected
+    modules, quant_dtype, block, expected, explicit_manager
 ):
     """Execute the installed factory, including its ordinary non-EP branch."""
     ns = types.SimpleNamespace
@@ -458,6 +629,10 @@ def test_deepep_factory_uses_bound_globals_and_quantized_protocol(
     def original(*args, **kwargs):
         return "original"
 
+    def get_manager():
+        assert not explicit_manager, "an explicitly supplied manager must be retained"
+        return manager
+
     provider = modules(
         "vllm.model_executor.layers.fused_moe.all2all_utils",
         current_platform=platform,
@@ -465,7 +640,7 @@ def test_deepep_factory_uses_bound_globals_and_quantized_protocol(
         maybe_make_prepare_finalize=original,
         maybe_roundup_layer_hidden_size=lambda *args: "upstream-roundup",
         make_moe_prepare_and_finalize_no_dp_ep=lambda flag: ("no-ep", flag),
-        get_ep_all2all_manager=lambda stage: manager,
+        get_ep_all2all_manager=get_manager,
         DEEPEP_QUANT_BLOCK_SHAPE=[128, 128],
     )
     consumer = modules(
@@ -490,7 +665,10 @@ def test_deepep_factory_uses_bound_globals_and_quantized_protocol(
     moe.hidden_dim = 3584
     moe.num_experts = 16
     result = consumer.maybe_make_prepare_finalize(
-        moe, ns(quant_dtype=quant_dtype, block_shape=block), ("g2p", "p2g", "ids")
+        moe,
+        ns(quant_dtype=quant_dtype, block_shape=block),
+        ("g2p", "p2g", "ids"),
+        all2all_manager=manager if explicit_manager else None,
     )
     assert (
         result.use_fp8_dispatch,

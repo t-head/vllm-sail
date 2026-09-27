@@ -52,13 +52,31 @@ def _patched(module_name: str, attribute: str):
 @pytest.mark.parametrize(
     ("module_name", "attribute"),
     [
-        ("vllm.model_executor.layers.quantization.utils.fp8_utils", "get_tma_aligned_size"),
-        ("vllm.model_executor.layers.quantization.utils.fp8_utils", "is_deep_gemm_e8m0_used"),
-        ("vllm.model_executor.layers.quantization.utils.fp8_utils", "transform_sf_into_required_layout"),
+        (
+            "vllm.model_executor.layers.quantization.utils.fp8_utils",
+            "get_tma_aligned_size",
+        ),
+        (
+            "vllm.model_executor.layers.quantization.utils.fp8_utils",
+            "is_deep_gemm_e8m0_used",
+        ),
+        (
+            "vllm.model_executor.layers.quantization.utils.fp8_utils",
+            "transform_sf_into_required_layout",
+        ),
         ("vllm.model_executor.layers.quantization.fp8", "is_deep_gemm_supported"),
-        ("vllm.model_executor.layers.quantization.input_quant_fp8", "DeepGemmQuantScaleFMT"),
-        ("vllm.model_executor.layers.quantization.input_quant_fp8", "is_deep_gemm_e8m0_used"),
-        ("vllm.model_executor.layers.quantization.input_quant_fp8", "is_deep_gemm_supported"),
+        (
+            "vllm.model_executor.layers.quantization.input_quant_fp8",
+            "DeepGemmQuantScaleFMT",
+        ),
+        (
+            "vllm.model_executor.layers.quantization.input_quant_fp8",
+            "is_deep_gemm_e8m0_used",
+        ),
+        (
+            "vllm.model_executor.layers.quantization.input_quant_fp8",
+            "is_deep_gemm_supported",
+        ),
     ],
 )
 def test_deep_gemm_helpers_are_rebound_to_the_ppu_wrapper(
@@ -129,9 +147,12 @@ def test_kernel_warmup_delegates_off_ppu_and_runs_ppu_warmup_on_ppu(
 
     calls: list[str] = []
     monkeypatch.setattr(
-        kw_patch, "_upstream_kernel_warmup", lambda worker, **kwargs: calls.append("upstream")
+        kw_patch,
+        "_upstream_kernel_warmup",
+        lambda worker, **kwargs: calls.append("upstream"),
     )
     worker = types.SimpleNamespace(
+        model_runner=types.SimpleNamespace(),
         get_model=lambda: calls.append("get_model") or object(),
         scheduler_config=types.SimpleNamespace(max_num_batched_tokens=512),
     )
@@ -172,6 +193,46 @@ def test_kernel_warmup_delegates_off_ppu_and_runs_ppu_warmup_on_ppu(
     assert calls == ["upstream"]
 
 
+def test_kernel_warmup_filters_real_jit_registry(monkeypatch, installed):
+    from types import SimpleNamespace
+
+    import vllm.distributed
+    from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry, VllmJitKernel
+    from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import (
+        VllmCuTeDSLJitKernel,
+    )
+
+    from vllm_sail.patch.enhancement.kernel_warmup import (
+        _exclude_ppu_cutedsl_registrations,
+    )
+
+    calls = []
+
+    class UnsupportedKernel(VllmCuTeDSLJitKernel):
+        def get_warmup_keys(self):
+            pytest.fail("PPU must exclude CuTeDSL before expanding compile keys")
+
+        def warmup_inputs(self, compile_key):
+            pytest.fail("PPU must never prepare CuTeDSL compilation")
+
+    class SupportedKernel(VllmJitKernel):
+        def get_warmup_keys(self, *, head_dim):
+            return [head_dim]
+
+        def compile(self, compile_key):
+            calls.append(compile_key)
+
+    registry = JitWarmupRegistry(SimpleNamespace())
+    with registry.activate():
+        UnsupportedKernel().register_warmup()
+        SupportedKernel().register_warmup(head_dim=128)
+    worker = SimpleNamespace(model_runner=SimpleNamespace(jit_warmup_registry=registry))
+    _exclude_ppu_cutedsl_registrations(worker)
+    monkeypatch.setattr(vllm.distributed, "is_global_first_rank", lambda: False)
+    registry.warmup()
+    assert calls == [128]
+
+
 # ---------------------------------------------------------------------------
 # quant_keys
 # ---------------------------------------------------------------------------
@@ -181,8 +242,13 @@ def test_int8_quant_keys_constants_exist(installed) -> None:
     import torch
     from vllm.model_executor.layers.quantization.utils import quant_utils
 
-    assert quant_utils.kStaticChannelScale.group_shape is quant_utils.GroupShape.PER_CHANNEL
-    assert quant_utils.kDynamicTokenScale.group_shape is quant_utils.GroupShape.PER_TOKEN
+    assert (
+        quant_utils.kStaticChannelScale.group_shape
+        is quant_utils.GroupShape.PER_CHANNEL
+    )
+    assert (
+        quant_utils.kDynamicTokenScale.group_shape is quant_utils.GroupShape.PER_TOKEN
+    )
     assert quant_utils.kInt8StaticChannelSym == quant_utils.QuantKey(
         torch.int8, quant_utils.kStaticChannelScale, symmetric=True
     )
@@ -196,7 +262,9 @@ def test_int8_quant_keys_constants_exist(installed) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_block_fp8_configs_upstream_wins(monkeypatch: pytest.MonkeyPatch, installed) -> None:
+def test_block_fp8_configs_upstream_wins(
+    monkeypatch: pytest.MonkeyPatch, installed
+) -> None:
     import vllm_sail.patch.enhancement.tuned_config_lookup as lookup
 
     sentinel = {1: {"BLOCK_SIZE_M": 16}}
@@ -217,10 +285,10 @@ def test_block_fp8_configs_fall_back_to_plugin_directory(
     assert all(isinstance(key, int) for key in config)
 
 
-def test_block_config_filename_formats_differ_by_space(
+def test_fp8_block_config_filename_matches_upstream_format(
     monkeypatch: pytest.MonkeyPatch, installed
 ) -> None:
-    """fp8 uses block_shape=[n,k]; int8 uses block_shape=[n, k]. Ugly but real."""
+    """Retain FP8's compact block_shape after removal of the INT8 loader."""
     import vllm_sail.patch.enhancement.tuned_config_lookup as lookup
 
     seen: list[str] = []
@@ -230,20 +298,14 @@ def test_block_config_filename_formats_differ_by_space(
         return None
 
     monkeypatch.setattr(lookup, "_upstream_fp8", lambda *args: None)
-    monkeypatch.setattr(lookup, "_upstream_int8", lambda *args: None)
     monkeypatch.setattr(lookup, "_load_plugin_config", _record)
     monkeypatch.setattr(lookup, "get_device_name_as_file_name", lambda: "PPU-ZW810E")
 
     lookup.get_w8a8_block_fp8_configs(1024, 2048, 128, 128)
-    lookup.get_w8a8_block_int8_configs(1024, 2048, 128, 128)
     assert seen[0] == (
-        "N=1024,K=2048,device_name=PPU-ZW810E,dtype=fp8_w8a8,"
-        "block_shape=[128,128].json"
+        "N=1024,K=2048,device_name=PPU-ZW810E,dtype=fp8_w8a8,block_shape=[128,128].json"
     )
-    assert seen[1] == (
-        "N=1024,K=2048,device_name=PPU-ZW810E,dtype=int8_w8a8,"
-        "block_shape=[128, 128].json"
-    )
+    assert len(seen) == 1
 
 
 # ---------------------------------------------------------------------------

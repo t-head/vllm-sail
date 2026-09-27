@@ -48,6 +48,49 @@ environment with their dependencies installed. Investigate failures and report
 skip reasons; do not compare test counts from different environments as if they
 cover the same paths.
 
+### Check upstream source compatibility
+
+Tests live with the feature they cover, independently of the vLLM release that
+introduced them. Tests marked `upstream_source` read a selected vLLM checkout
+without importing vLLM, torch or the SDK:
+
+```bash
+VLLM_SOURCE_ROOT=/path/to/vllm python -m pytest tests/ut -q -rs \
+  -m upstream_source --require-upstream-source
+```
+
+`VLLM_SOURCE_ROOT` names the checkout root containing `vllm/__init__.py`.
+Without it, ordinary CPU runs skip source-dependent checks. The required-source
+option makes a missing or invalid checkout an error, so CI cannot silently
+skip these checks. The source tests cover selected upstream call sites, keyword
+compatibility, quantization behavior and imported consumer inventories. They do
+not establish that module imports, patch installation or device inference work.
+
+### CI jobs
+
+The [unit-test workflow](../../.github/workflows/ut.yaml) runs for pull requests,
+pushes to `main` or `master`, and manual dispatch. Its jobs run independently:
+
+| Job | Environment and checks | Failure handling |
+| --- | --- | --- |
+| CPU UT | Python 3.10–3.13; only `requirements/dev.txt`; UT and branch coverage | Test failure fails the workflow; coverage-upload failure does not |
+| vLLM source | Python 3.12; checks out each configured upstream ref; runs `upstream_source` tests with a required source path | Checkout or test failure fails the workflow |
+| vLLM pin | Python 3.12; installs each configured vLLM version and runs the remaining UT | Advisory (`continue-on-error`), because installation may fail on a public CPU runner |
+
+The source and installed-vLLM jobs use the same two inputs:
+[release tag](../../.github/vllm-release-tag.commit) and
+[verified main commit](../../.github/vllm-main-verified.commit). Update these
+inputs when qualifying a new upstream version; keep feature tests named after
+their behavior. The source job logs the resolved commit. Repository branch
+protection determines which job results are required for merging.
+
+The separate [upstream canary](../../.github/workflows/upstream-canary.yaml) runs
+weekly on Tuesday at 03:17 UTC and on manual dispatch. It installs upstream
+`main` and checks patch drift. A drift failure opens or updates the tracking
+issue and fails the job. Installation failure stops before that report step.
+This scheduled check does not replace PR checks, and none of these public CPU
+jobs runs PPU inference or `tests/e2e`.
+
 ## 3. Run device correctness tests
 
 In the PPU environment, install `requirements/dev.txt`. Use an editable native

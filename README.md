@@ -54,11 +54,11 @@ for validating a deployment.
 | Hardware | PPU cards ZW-810, ZW-810E and ZW-890; build targets `ppu_10` and `ppu_15` |
 | Operating system | Linux for PPU builds and inference |
 | Python | 3.10–3.13; choose a version supported by your SDK packages |
-| vLLM | `>=0.27.0,<0.28.0`, built with `VLLM_TARGET_DEVICE=empty` |
+| vLLM | `>=0.30.0,<0.31.0`, built with `VLLM_TARGET_DEVICE=empty` |
 | SAIL software | SAIL SDK, SAIL PyTorch and matching PPU compute libraries |
 | Build tools | `hgcc`, CMake, Ninja and a C++ compiler; CMake fetches pinned cmake-hgcc sources when needed |
 
-The generated upstream kernel sources are pinned to **vLLM v0.27.1**. The
+The generated upstream kernel sources are pinned to **vLLM v0.30.0**. The
 [installation guide](docs/getting_started/installation.md) describes dependency
 setup and native extension checks.
 

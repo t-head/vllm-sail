@@ -41,17 +41,22 @@ def supports_combination(
             head_size=head_size,
             head_size_v=head_size,
             has_sinks=has_sink,
+            kv_cache_block_size=block_size,
+            supports_fa4_hd256=True,
         )
     ):
         # PPU MODIFICATION: begin
-        return (
-            "FP8 KV cache requires FA3 on SM90, FA3 on PPU sm_89, "
-            "or FA4 on SM100"
-        )
+        return "FP8 KV cache requires FA3 on SM90, FA3 on PPU sm_89, or FA4 on SM100"
         # PPU MODIFICATION: end
     if (
         use_mm_prefix
-        and get_flash_attn_version(head_size=head_size, has_sinks=has_sink) != 4
+        and get_flash_attn_version(
+            head_size=head_size,
+            has_sinks=has_sink,
+            kv_cache_block_size=block_size,
+            supports_fa4_hd256=True,
+        )
+        != 4
     ):
         return (
             "mm_prefix (PrefixLM bidirectional attention) requires "
@@ -65,6 +70,6 @@ patch(
     "vllm.v1.attention.backends.flash_attn",
     "FlashAttentionBackend.supports_combination",
     reason="The upstream sink combination gate assumes only NVIDIA SM90 supports FA3 sinks.",
-    affected_versions=">=0.27.0,<0.28.0",
+    affected_versions=">=0.30.0,<0.31.0",
     remove_when="FlashAttentionBackend gates sinks through the selected implementation's capabilities.",
 )(bind_body(supports_combination, _flash_attn))

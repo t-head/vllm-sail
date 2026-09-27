@@ -26,7 +26,7 @@ from vllm_sail.patch.utils import patch
 
 logger = init_logger(__name__)
 
-_AFFECTED = ">=0.27.0,<0.28.0"
+_AFFECTED = ">=0.30.0,<0.31.0"
 _MODULE = "vllm.v1.attention.backends.mla.prefill.flash_attn"
 
 try:

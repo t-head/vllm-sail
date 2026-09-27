@@ -10,6 +10,7 @@ leak into another test and hide an unexpected dependency.
 from __future__ import annotations
 
 import importlib.util
+import os
 import subprocess
 import sys
 import types
@@ -19,6 +20,8 @@ from typing import Any, NamedTuple
 from uuid import uuid4
 
 import pytest
+
+from tests.support.source import source_root
 
 
 class DeviceCapability(NamedTuple):
@@ -95,8 +98,27 @@ def _real_device_available() -> bool:
 HAS_REAL_DEVICE = _real_device_available()
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--require-upstream-source",
+        action="store_true",
+        help="Fail early unless VLLM_SOURCE_ROOT points to upstream source",
+    )
+
+
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line("markers", "ppu: requires a real PPU/CUDA device")
+    if config.getoption("--require-upstream-source"):
+        source_root(os.environ.get("VLLM_SOURCE_ROOT"), required=True)
+
+
+@pytest.fixture(scope="session")
+def upstream_source_root(request: pytest.FixtureRequest) -> Path:
+    """Use the explicitly selected source without importing upstream packages."""
+    return source_root(
+        os.environ.get("VLLM_SOURCE_ROOT"),
+        required=request.config.getoption("--require-upstream-source"),
+    )
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:

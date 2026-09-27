@@ -37,6 +37,7 @@ from vllm_sail.native import porting, stubs
         "fp8_to_halfraw",
         "fp8x2_to_halfraw2",
         "halfraw_to_fp8",
+        "halfraw2_to_fp8x2",
     ],
 )
 def test_sailify_completes_fp8_intrinsics(tmp_path, monkeypatch, suffix):

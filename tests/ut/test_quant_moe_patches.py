@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import os
 import sys
 import types
 from collections.abc import Iterator
@@ -167,7 +168,7 @@ def test_every_patch_call_carries_metadata(leaf_module) -> None:
     decorated_calls = [
         decorator
         for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
         for decorator in node.decorator_list
         if isinstance(decorator, ast.Call) and _callee_name(decorator) == "patch"
     ]
@@ -397,9 +398,12 @@ def test_mxfp4_quantize_aliases_preserve_other_overrides(monkeypatch) -> None:
 
 
 def test_mxfp4_quantize_alias_inventory_matches_vllm_source() -> None:
-    vllm = pytest.importorskip("vllm")
+    if source := os.environ.get("VLLM_SOURCE_ROOT"):
+        root = Path(source).resolve() / "vllm"
+    else:
+        vllm = pytest.importorskip("vllm")
+        root = Path(vllm.__file__).resolve().parent
     module = _leaf("fused_moe_ppu")
-    root = Path(vllm.__file__).resolve().parent
     discovered = set()
     for path in root.rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -574,9 +578,9 @@ def _build_ct_stubs(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     state["ct_fp8"] = ct_fp8
 
     def is_layer_skipped(
-        prefix, ignored_layers, fused_mapping=None, skip_with_substr=False
+        prefix, ignored_layers, fused_mapping=None, *, match_mode="exact"
     ):
-        if skip_with_substr:
+        if match_mode == "substring":
             return any(needle in prefix for needle in ignored_layers)
         return prefix in ignored_layers
 

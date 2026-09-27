@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.source import assert_accepts_upstream_keywords
+
 ROOT = Path(__file__).parents[2]
 BASE = "vllm.models.deepseek_v4"
 Q_PROVIDER = f"{BASE}.common.ops.fused_indexer_q"
@@ -99,12 +101,8 @@ def installed(monkeypatch, patch_utils_module):
 )
 def test_ppu10_query_bypasses_unsupported_fp8_kernel(installed, consumer):
     _, modules, calls, _ = installed
-    buffers = object()
-    assert (
-        modules[consumer].fused_indexer_q_rope_quant(*range(6), output_buffers=buffers)
-        == "int8_q"
-    )
-    assert calls[-1][2]["output_buffers"] is buffers
+    assert modules[consumer].fused_indexer_q_rope_quant(*range(6)) == "int8_q"
+    assert calls[-1][2] == {}
 
 
 @pytest.mark.parametrize(
@@ -120,11 +118,11 @@ def test_other_query_paths_delegate(installed, ppu, capability, use_fp4):
     platform.ppu, platform.capability = ppu, capability
     assert (
         modules[f"{BASE}.attention"].fused_indexer_q_rope_quant(
-            *range(6), use_fp4=use_fp4, output_buffers=None
+            *range(6), use_fp4=use_fp4
         )
         == "upstream_q"
     )
-    assert calls[-1][2] == {"use_fp4": use_fp4, "output_buffers": None}
+    assert calls[-1][2] == {"use_fp4": use_fp4}
 
 
 @pytest.mark.parametrize("consumer", [K_PROVIDER, f"{BASE}.compressor"])
@@ -281,3 +279,23 @@ def test_query_wrapper_returns_int8_and_preserves_output_buffers(
         assert (result_w == 0.125).all()
     else:
         assert not launch_args
+
+
+@pytest.mark.upstream_source
+@pytest.mark.parametrize(
+    "local,local_name,upstream,upstream_name",
+    [
+        (
+            "attention/sparse_attn_indexer",
+            "sparse_attn_indexer_init",
+            "model_executor/layers/sparse_attn_indexer",
+            "SparseAttnIndexer.__init__",
+        )
+    ],
+)
+def test_replacements_accept_upstream_keywords(
+    upstream_source_root, local, local_name, upstream, upstream_name
+):
+    assert_accepts_upstream_keywords(
+        local, local_name, upstream_source_root, upstream, upstream_name
+    )

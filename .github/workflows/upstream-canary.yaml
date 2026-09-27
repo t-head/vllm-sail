@@ -28,6 +28,8 @@ jobs:
       - name: Check patched upstream source
         id: drift
         continue-on-error: true
+        # Preserve the checker's exit status across tee so drift is reported.
+        shell: bash
         run: python tools/check_patch_drift.py 2>&1 | tee patch-drift.txt
       - name: Open or update the upstream-drift issue
         if: steps.drift.outcome == 'failure'

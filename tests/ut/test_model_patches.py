@@ -26,6 +26,8 @@ import sys
 
 import pytest
 
+from tests.support.source import assert_accepts_upstream_keywords
+
 MODELS_PATCH_DIR = (
     pathlib.Path(__file__).parents[2] / "vllm_sail" / "patch" / "enhancement" / "models"
 )
@@ -39,7 +41,6 @@ EXPECTED_MODULES = {
     "deepseek_v4_compressor",
     "llama4",
     "moe_marlin_gate",
-    "qwen3_dspark",
     "qwen3_fused_quant",
     "qwen3_moe",
     "qwen3_next",
@@ -221,8 +222,6 @@ _EXPECTED_TARGETS = {
     "vllm.model_executor.models.deepseek_mtp.DeepSeekMTP.load_weights",
     "vllm.models.deepseek_v4.nvidia.model._select_dsv4_attn_cls",
     "vllm.model_executor.models.llama4.Llama4MoE.custom_routing_function",
-    "vllm.model_executor.models.qwen3_dspark.DSparkMarkovHead.__init__",
-    "vllm.model_executor.models.qwen3_dspark.Qwen3DSparkModel.__init__",
     "vllm.model_executor.models.qwen3_moe.Qwen3MoeSparseMoeBlock.__init__",
     "vllm.model_executor.models.qwen3_moe.Qwen3MoeDecoderLayer.__init__",
     "vllm.model_executor.models.qwen3_moe.Qwen3MoeModel.__init__",
@@ -380,3 +379,29 @@ def test_reapplication_raises(installed_model_patches) -> None:
         )
         def custom_routing_function(*args, **kwargs):
             raise AssertionError("must not install")
+
+
+@pytest.mark.upstream_source
+@pytest.mark.parametrize(
+    "local,local_name,upstream,upstream_name",
+    [
+        (
+            "models/deepseek_v4_compressor",
+            "__init__",
+            "models/deepseek_v4/compressor",
+            "DeepseekCompressor.__init__",
+        ),
+        (
+            "models/deepseek_v4_cache",
+            "dequantize_and_gather_k_cache",
+            "models/deepseek_v4/common/ops/cache_utils",
+            "dequantize_and_gather_k_cache",
+        ),
+    ],
+)
+def test_replacements_accept_upstream_keywords(
+    upstream_source_root, local, local_name, upstream, upstream_name
+):
+    assert_accepts_upstream_keywords(
+        local, local_name, upstream_source_root, upstream, upstream_name
+    )

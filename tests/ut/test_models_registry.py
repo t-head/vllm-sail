@@ -172,6 +172,74 @@ def test_deepseek_mapper_selection_is_instance_local() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "expert_dtype,channelwise_layers",
+    [
+        ("fp4", None),
+        ("fp4", ["layers.0.attn.wq_a"]),
+        ("fp8", None),
+        ("int8", None),
+        ("int4", None),
+    ],
+)
+def test_deepseek_target_loader_filters_mtp_weights(
+    monkeypatch, expert_dtype, channelwise_layers
+) -> None:
+    """The target loader must not receive parameters owned by the draft model."""
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("vllm")
+    from vllm.model_executor.models.utils import AutoWeightsLoader
+    from vllm.models.deepseek_v4.nvidia import model as upstream
+
+    from vllm_sail.models.deepseek_v4.model import (
+        DeepseekV4ForCausalLM,
+        _make_deepseek_v4_weights_mapper,
+    )
+
+    # Exercise real loader traversal with one tiny CPU parameter, without
+    # constructing the full model or initializing a distributed device group.
+    target = DeepseekV4ForCausalLM.__new__(DeepseekV4ForCausalLM)
+    torch.nn.Module.__init__(target)
+    body = upstream.DeepseekV4Model.__new__(upstream.DeepseekV4Model)
+    torch.nn.Module.__init__(body)
+    body.config = SimpleNamespace(num_attention_heads=4)
+    body.quant_config = None
+    body.use_sequence_parallel = False
+    body.get_expert_mapping = lambda: []
+    layer = torch.nn.Module()
+    layer.attn = torch.nn.Module()
+    layer.attn.attn_sink = torch.nn.Parameter(torch.zeros(1), requires_grad=False)
+    body.layers = torch.nn.ModuleList([layer])
+    target.model = body
+    monkeypatch.setattr(upstream, "get_tensor_model_parallel_world_size", lambda: 4)
+    monkeypatch.setattr(upstream, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(upstream, "is_pp_missing_parameter", lambda *args: False)
+
+    mapper = _make_deepseek_v4_weights_mapper(expert_dtype, channelwise_layers)
+    weights = [
+        ("layers.0.attn.attn_sink", torch.arange(1, 5, dtype=torch.float32)),
+        ("mtp.0.attn.attn_sink", torch.full((4,), 99.0)),
+        ("mtp.0.attn.wq_a.scale", torch.ones(1)),
+        ("mtp.0.ffn.experts.0.w1.scale", torch.ones(1)),
+    ]
+    loaded = AutoWeightsLoader(target).load_weights(weights, mapper=mapper)
+    assert loaded == {"model.layers.0.attn.attn_sink"}
+    assert layer.attn.attn_sink.item() == 1.0
+
+
+def test_dspark_draft_keeps_mtp_names_for_its_own_loader() -> None:
+    pytest.importorskip("vllm")
+    from vllm_sail.models.deepseek_v4.dspark import DSparkDeepseekV4ForCausalLM
+
+    draft = DSparkDeepseekV4ForCausalLM.__new__(DSparkDeepseekV4ForCausalLM)
+    key = "mtp.0.attn.attn_sink"
+    assert draft._remap_dspark_name(key) == "model.layers.0.attn.attn_sink"
+    assert draft._remap_dspark_name("layers.0.attn.attn_sink") is None
+    # Quantization setup consumes renames, not target-only weight exclusions.
+    rename_mapper = draft.hf_to_vllm_mapper.get_rename_mapper()
+    assert rename_mapper._map_name(key) == "model.mtp.0.attn.attn_sink"
+
+
 def test_one_broken_model_does_not_break_the_hook(
     fresh_models_package, fake_vllm: _RecordingRegistry, caplog
 ) -> None:

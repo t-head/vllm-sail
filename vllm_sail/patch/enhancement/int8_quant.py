@@ -34,7 +34,7 @@ from vllm.triton_utils import tl, triton
 
 from vllm_sail.patch.utils import patch
 
-_AFFECTED = ">=0.27.0,<0.28.0"
+_AFFECTED = ">=0.30.0,<0.31.0"
 
 
 @patch(

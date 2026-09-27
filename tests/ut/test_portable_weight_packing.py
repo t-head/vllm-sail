@@ -30,10 +30,7 @@ def test_weight_layout_permutation_is_bijective(bits, activation8):
 
 @pytest.mark.parametrize("bits", [4, 8])
 @pytest.mark.parametrize("activation8", [False, True])
-@pytest.mark.parametrize("actorder", [False, True])
-def test_packed_weights_match_upstream_independent_reference(
-    bits, activation8, actorder
-):
+def test_packed_weights_match_upstream_independent_reference(bits, activation8):
     torch = pytest.importorskip("torch")
     np = pytest.importorskip("numpy")
     source = Path(os.environ.get("VLLM_SOURCE_ROOT", ROOT.parent / "vllm"))
@@ -70,14 +67,9 @@ def test_packed_weights_match_upstream_independent_reference(
         gptq = torch.zeros((k // pack, n), dtype=torch.int32)
         for i in range(pack):
             gptq |= weights[i::pack] << (bits * i)
-        perm = (
-            torch.randperm(k, dtype=torch.int32, generator=generator)
-            if actorder
-            else torch.empty(0, dtype=torch.int32)
-        )
-        actual = portable.gptq_marlin_repack(gptq, perm, k, n, bits, activation8)
+        actual = portable.gptq_marlin_repack(gptq, k, n, bits, activation8)
         expected = namespace["marlin_weights"](
-            weights[perm.long()] if actorder else weights,
+            weights,
             k,
             n,
             bits,

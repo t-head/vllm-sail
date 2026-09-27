@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+# ruff: noqa: F821
+# Copied bodies resolve globals in their upstream module through bind_body.
 """PPU patches for ``vllm.model_executor.layers.sparse_attn_indexer``.
 
 The fork makes three changes to ``SparseAttnIndexer``:
@@ -26,18 +28,24 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed import get_dcp_group
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.layers import sparse_attn_indexer as _indexer
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import has_deep_gemm
 from vllm.utils.torch_utils import _encode_layer_name
 
 import vllm_sail.ops  # noqa: F401  (registers torch.ops.vllm.ppu_sparse_attn_indexer)
+from vllm_sail.patch.bodies import bind_body
 from vllm_sail.patch.utils import patch
 from vllm_sail.utils.deep_gemm import is_deep_gemm_supported
 
-_AFFECTED = ">=0.27.0,<0.28.0"
+_AFFECTED = ">=0.30.0,<0.31.0"
 _MODULE = "vllm.model_executor.layers.sparse_attn_indexer"
 
 logger = init_logger(__name__)
+
+
+def _with_target_globals(fn):
+    return bind_body(fn, _indexer)
 
 
 @patch(
@@ -53,6 +61,7 @@ logger = init_logger(__name__)
     affected_versions=_AFFECTED,
     remove_when="upstream downgrades the missing-DeepGEMM error to a warning, or PPU always ships DeepGEMM.",
 )
+@_with_target_globals
 def sparse_attn_indexer_init(
     self,
     k_cache,
@@ -65,8 +74,15 @@ def sparse_attn_indexer_init(
     topk_indices_buffer: torch.Tensor,
     skip_k_cache_insert: bool = False,
     use_fp4_cache: bool = False,
+    compress_ratio: int = 1,
+    candidate_blocks: torch.Tensor | None = None,
+    candidate_block_size: int = 0,
+    candidate_write: bool = False,
 ):
-    CustomOp.__init__(self)
+    # PPU MODIFICATION: begin
+    # An out-of-class copied method has no implicit __class__ cell.
+    super(SparseAttnIndexer, self).__init__()
+    # PPU MODIFICATION: end
     self.k_cache = k_cache
     self.quant_block_size = quant_block_size
     self.scale_fmt = scale_fmt
@@ -77,31 +93,71 @@ def sparse_attn_indexer_init(
     self.topk_indices_buffer = topk_indices_buffer
     self.skip_k_cache_insert = skip_k_cache_insert
     self.use_fp4_cache = use_fp4_cache
+    self.compress_ratio = compress_ratio
+    # v4.1 two-level selection: the candidate source indexer writes the
+    # top candidate blocks here; later indexers mask their scores with it.
+    self.candidate_blocks = candidate_blocks
+    self.candidate_block_size = candidate_block_size
+    self.candidate_write = candidate_write
     self.dense_mha_metadata_layer_name = ""
     # DCP scalars are constant for the run; resolve them here (config is set
     # during model construction) and pass them into the custom op, rather
     # than threading them through per-step metadata.
-    parallel_config = get_current_vllm_config().parallel_config
+    vllm_config = get_current_vllm_config()
+    parallel_config = vllm_config.parallel_config
+    self.topk_backend = vllm_config.kernel_config.sparse_indexer_topk_backend
+    self._parallel_config = parallel_config
     self.dcp_world_size = parallel_config.decode_context_parallel_size
     self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
-    self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
     self.use_pcp = parallel_config.prefill_context_parallel_size > 1
+    self._cp_kv_cache_interleave_size: int | None = None
     # PPU MODIFICATION: begin
-    # Fork's PPU branch: warn (PyTorch fallback) instead of raising when
-    # DeepGEMM is missing; the upstream CUDA raise moves to an elif.
+    from vllm_sail.utils.deep_gemm import is_deep_gemm_supported
+
     if current_platform.is_ppu() and not is_deep_gemm_supported():
-        logger.warning_once(
-            "DeepGEMM is not supported or available. SparseAttnIndexer will use a "
-            "less efficient PyTorch implementation. "
-            "Please make sure you have the required hardware and software setup "
-            "for DeepGEMM to achieve optimal performance."
-        )
-    elif current_platform.is_cuda() and not has_deep_gemm():
+        logger.warning_once("SparseAttnIndexer requires SAIL DeepGEMM for PPU logits.")
+    elif (
+        not current_platform.is_ppu()
+        and current_platform.is_cuda()
+        and not has_deep_gemm()
+    ):
         # PPU MODIFICATION: end
         raise RuntimeError(
             "Sparse Attention Indexer CUDA op requires DeepGEMM support in "
             "the current vLLM environment."
         )
+
+    if vllm_config.kernel_config.enable_jit_warmup:
+        from vllm.v1.attention.ops.common import (
+            _PACK_SEQ_TRITON_KERNEL,
+            _UNPACK_SEQ_TRITON_KERNEL,
+        )
+
+        pack_dtype = torch.uint8 if use_fp4_cache else current_platform.fp8_dtype()
+        _PACK_SEQ_TRITON_KERNEL.register_warmup(
+            dtype=pack_dtype,
+            pad_value=0 if use_fp4_cache else -float("inf"),
+        )
+        _UNPACK_SEQ_TRITON_KERNEL.register_warmup()
+
+        # PPU MODIFICATION: begin
+        if (
+            self.dcp_world_size > 1
+            and not current_platform.is_ppu()
+            and current_platform.is_cuda()
+            and has_cutedsl()
+        ):
+            # PPU MODIFICATION: end
+            from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (  # noqa: E501
+                _PACK_DCP_TOPK_CANDIDATES_KERNEL,
+                _STABLE_TOPK_FROM_GATHERED_CANDIDATES_KERNEL,
+            )
+
+            _PACK_DCP_TOPK_CANDIDATES_KERNEL.register_warmup()
+            _STABLE_TOPK_FROM_GATHERED_CANDIDATES_KERNEL.register_warmup()
+
+
+_upstream_forward_native = _indexer.SparseAttnIndexer.forward_native
 
 
 @patch(
@@ -110,7 +166,7 @@ def sparse_attn_indexer_init(
     reason=(
         "Fork redirects SparseAttnIndexer.forward_native to forward_ppu on PPU "
         "before the CUDA branch, so the disabled-custom-op path also uses the "
-        "PPU kernel. Verbatim upstream body with the fork's insertion marked."
+        "PPU kernel; other platforms delegate to the upstream implementation."
     ),
     affected_versions=_AFFECTED,
     remove_when="upstream's forward_native grows a platform hook, or PPU stops overriding this op.",
@@ -119,22 +175,12 @@ def sparse_attn_indexer_forward_native(
     self,
     hidden_states: torch.Tensor,
     q_quant: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-    k: torch.Tensor,
+    k: torch.Tensor | None,
     weights: torch.Tensor,
 ):
-    # PPU MODIFICATION: begin
     if current_platform.is_ppu():
         return self.forward_ppu(hidden_states, q_quant, k, weights)
-    # PPU MODIFICATION: end
-    if current_platform.is_cuda() or current_platform.is_xpu():
-        return self.forward_cuda(hidden_states, q_quant, k, weights)
-    elif current_platform.is_rocm():
-        return self.forward_hip(hidden_states, q_quant, k, weights)
-    else:
-        raise NotImplementedError(
-            "SparseAttnIndexer native forward is only implemented for "
-            "CUDA, ROCm and XPU platforms."
-        )
+    return _upstream_forward_native(self, hidden_states, q_quant, k, weights)
 
 
 @patch(
@@ -155,7 +201,7 @@ def sparse_attn_indexer_forward_ppu(
     self,
     hidden_states: torch.Tensor,
     q_quant: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-    k: torch.Tensor,
+    k: torch.Tensor | None,
     weights: torch.Tensor,
 ):
     if isinstance(q_quant, tuple):
@@ -179,4 +225,7 @@ def sparse_attn_indexer_forward_ppu(
         self.topk_indices_buffer,
         self.skip_k_cache_insert,
         self.use_fp4_cache,
+        self.candidate_blocks,
+        self.candidate_block_size,
+        self.candidate_write,
     )

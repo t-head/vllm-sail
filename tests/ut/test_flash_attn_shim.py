@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.source import assert_accepts_upstream_keywords
+
 
 @pytest.fixture
 def run_shim(tmp_path: Path):
@@ -205,3 +207,46 @@ def test_lazy_api_forwards_arguments_and_results_to_the_ppu_implementation(run_s
         assert api.is_fa_version_supported(3, device=0)
         assert api.fa_version_unsupported_reason(2) == 'SDK reason'
     """)
+
+
+def test_fa4_probe_does_not_load_sdk(monkeypatch):
+    from vllm_sail.attention.flash_attn import flash_attn_interface as interface
+
+    def forbidden():
+        pytest.fail("a capability probe for FA4 must not import PPU binaries")
+
+    monkeypatch.setattr(interface, "_kernels", forbidden)
+    assert interface.is_fa_version_supported(4) is False
+    assert "FA4" in interface.fa_version_unsupported_reason(4)
+
+
+@pytest.mark.upstream_source
+@pytest.mark.parametrize(
+    "local,local_name,upstream,upstream_name",
+    [
+        (
+            "attention/fa_utils",
+            "get_flash_attn_version",
+            "v1/attention/backends/fa_utils",
+            "get_flash_attn_version",
+        ),
+        (
+            "attention/fa_utils",
+            "flash_attn_supports_kv_cache_dtype",
+            "v1/attention/backends/fa_utils",
+            "flash_attn_supports_kv_cache_dtype",
+        ),
+        (
+            "attention/flash_attn",
+            "supports_combination",
+            "v1/attention/backends/flash_attn",
+            "FlashAttentionBackend.supports_combination",
+        ),
+    ],
+)
+def test_replacements_accept_upstream_keywords(
+    upstream_source_root, local, local_name, upstream, upstream_name
+):
+    assert_accepts_upstream_keywords(
+        local, local_name, upstream_source_root, upstream, upstream_name
+    )

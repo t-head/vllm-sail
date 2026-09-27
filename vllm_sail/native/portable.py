@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Load-time weight packing using Torch operations, with no CUDA/CUTLASS code.
 
-The permutation follows vLLM 0.27 marlin_utils_test.py's reference layout.
+The permutation follows vLLM 0.30 marlin_utils_test.py's reference layout.
 It is used once per expert during loading; inference remains in PPU DeepGEMM.
 """
 
@@ -45,7 +45,7 @@ def _weight_permutation(num_bits: int, is_a_8bit: bool) -> tuple[int, ...]:
 
 
 def gptq_marlin_repack(
-    b_q_weight, perm, size_k: int, size_n: int, num_bits: int, is_a_8bit: bool
+    b_q_weight, size_k: int, size_n: int, num_bits: int, is_a_8bit: bool
 ):
     import torch
 
@@ -62,14 +62,10 @@ def gptq_marlin_repack(
         size_n,
     ):
         raise ValueError("Expected GPTQ int32 weights of shape [K / pack_factor, N]")
-    if perm.numel() not in (0, size_k):
-        raise ValueError("GPTQ permutation must be empty or contain K indices")
     shifts = torch.arange(pack, device=b_q_weight.device, dtype=torch.int32) * num_bits
     unpacked = (
         (b_q_weight[:, None, :] >> shifts[None, :, None]) & ((1 << num_bits) - 1)
     ).reshape(size_k, size_n)
-    if perm.numel():
-        unpacked = unpacked.index_select(0, perm.to(dtype=torch.long))
     tiled = unpacked.reshape(size_k // tile_k, tile_k, size_n // 16, 16)
     tiled = tiled.permute(0, 2, 1, 3).reshape(size_k // 16, size_n * 16)
     order = torch.tensor(
@@ -110,7 +106,7 @@ def install() -> None:
     if not hasattr(torch.ops._C, "gptq_marlin_repack"):
         library = torch.library.Library("_C", "FRAGMENT")
         library.define(
-            "gptq_marlin_repack(Tensor b_q_weight, Tensor perm, SymInt size_k, SymInt size_n, int num_bits, bool is_a_8bit) -> Tensor"
+            "gptq_marlin_repack(Tensor b_q_weight, SymInt size_k, SymInt size_n, int num_bits, bool is_a_8bit) -> Tensor"
         )
         library.impl("gptq_marlin_repack", gptq_marlin_repack, "CUDA")
         _libraries.append(library)
