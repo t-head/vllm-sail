@@ -216,6 +216,7 @@
   "vllm.v1.attention.backends.mla.indexer.DeepseekV32IndexerMetadataBuilder.build": "17cda31e4f494774f950b424a40429a5ff430ed6a0eba8c2570d147ca5cae28e",
   "vllm.v1.attention.backends.mla.indexer.PPU_DEEP_GEMM_TB_PER_CU": "additive",
   "vllm.v1.attention.backends.mla.indexer.PPU_FP4_INDEXER_ELEMENT_SIZE": "additive",
+  "vllm.v1.attention.backends.mla.indexer._supports_flattened_device_query_lens": "7e81fa4605a8ce258828ee5b8bac0c515615e93b474f5f0a33654ae07113ddd4",
   "vllm.v1.attention.backends.mla.indexer.dsa_indexer_uses_fp4": "616f2e6e1be7425a63ba01a66bfdc2fc9d58db2905cc04758676b514ef29885d",
   "vllm.v1.attention.backends.mla.indexer.get_paged_mqa_logits_metadata": "8a51aa02a6e88a9c124ca3d09e5790802d3cca2d5058b0b93327fc2aed87fe01",
   "vllm.v1.attention.backends.mla.sparse_swa.get_mla_metadata": "689288c764f20ced631c8c92556e1dd0ecc255bf5a42bd62e10ac3a0385a2ccd",
