@@ -2,7 +2,10 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import FusedMoeWeightScaleSupported
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoeWeightScaleSupported,
+    UnquantizedFusedMoEMethod,
+)
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
@@ -25,6 +28,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     should_ignore_layer,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.model_executor.utils import set_weight_attrs
 
@@ -157,6 +161,12 @@ class MixedPrecisionW4Config(QuantizationConfig):
             else:
                 return self.get_int8_channelwise_quant_method(layer, prefix)
         elif isinstance(layer, RoutedExperts):
+            if is_layer_skipped(
+                prefix=prefix,
+                ignored_layers=self.ignored_layers,
+                fused_mapping=self.packed_modules_mapping,
+            ):
+                return UnquantizedFusedMoEMethod(layer.moe_config)
             if should_ignore_layer(
                 prefix,
                 ignore=self.int8_channelwise_layers,
