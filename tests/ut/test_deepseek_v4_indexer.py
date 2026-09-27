@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.source import assert_accepts_upstream_keywords
+
 ROOT = Path(__file__).parents[2]
 BASE = "vllm.models.deepseek_v4"
 Q_PROVIDER = f"{BASE}.common.ops.fused_indexer_q"
@@ -277,3 +279,23 @@ def test_query_wrapper_returns_int8_and_preserves_output_buffers(
         assert (result_w == 0.125).all()
     else:
         assert not launch_args
+
+
+@pytest.mark.upstream_source
+@pytest.mark.parametrize(
+    "local,local_name,upstream,upstream_name",
+    [
+        (
+            "attention/sparse_attn_indexer",
+            "sparse_attn_indexer_init",
+            "model_executor/layers/sparse_attn_indexer",
+            "SparseAttnIndexer.__init__",
+        )
+    ],
+)
+def test_replacements_accept_upstream_keywords(
+    upstream_source_root, local, local_name, upstream, upstream_name
+):
+    assert_accepts_upstream_keywords(
+        local, local_name, upstream_source_root, upstream, upstream_name
+    )

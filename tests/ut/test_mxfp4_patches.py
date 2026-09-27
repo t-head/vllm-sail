@@ -21,10 +21,12 @@ import sys
 import types
 from collections.abc import Iterator
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
 
+from tests.support.source import assert_accepts_upstream_keywords, function
 from vllm_sail.patch.utils import PATCH_REGISTRY
 
 MODULE_PATH = (
@@ -628,3 +630,58 @@ def test_oracle_round_up_sizes_32_on_ppu_backends(
         "DEEPGEMM_MXFP4", 2881, 2881
     ) == (2881, 2881)
     assert state.upstream_round_up == [("DEEPGEMM_MXFP4", 2881, 2881)]
+
+
+@pytest.mark.parametrize(
+    "ppu,sm80,backend,expected",
+    [
+        (True, False, "auto", "mxfp4"),
+        (True, False, "ppu_deep_gemm", "mxfp4"),
+        (True, True, "auto", None),
+        (True, False, "marlin", None),
+        (True, False, "ppu_deep_gemm_w4a16", None),
+        (False, False, "auto", "upstream"),
+    ],
+)
+def test_deepseek_v4_mxfp4_selector_preserves_activation_mode(
+    monkeypatch, ppu, sm80, backend, expected
+):
+    platforms = ModuleType("vllm.platforms")
+    platforms.current_platform = SimpleNamespace(
+        is_ppu=lambda: ppu,
+        is_device_capability=lambda cap: sm80 and cap == (8, 0),
+    )
+    monkeypatch.setitem(sys.modules, "vllm.platforms", platforms)
+    namespace = {
+        "oracle": SimpleNamespace(
+            kMxfp4Dynamic="mxfp4",
+            select_mxfp4_moe_backend=lambda config, activation_key: activation_key,
+        ),
+        "_upstream_select_deepseek_v4": lambda config: "upstream",
+    }
+    fn = function(
+        "vllm_sail/registry/moe_backends/mxfp4.py",
+        "select_deepseek_v4_mxfp4_moe_backend",
+        namespace,
+    )
+    assert fn(SimpleNamespace(moe_backend=backend)) == expected
+
+
+@pytest.mark.upstream_source
+@pytest.mark.parametrize(
+    "local,local_name,upstream,upstream_name",
+    [
+        (
+            "mxfp4",
+            "install._convert_weight",
+            "model_executor/layers/fused_moe/oracle/mxfp4",
+            "convert_weight_to_mxfp4_moe_kernel_format",
+        )
+    ],
+)
+def test_replacements_accept_upstream_keywords(
+    upstream_source_root, local, local_name, upstream, upstream_name
+):
+    assert_accepts_upstream_keywords(
+        local, local_name, upstream_source_root, upstream, upstream_name
+    )

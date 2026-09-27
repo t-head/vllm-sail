@@ -26,6 +26,8 @@ import sys
 
 import pytest
 
+from tests.support.source import assert_accepts_upstream_keywords
+
 MODELS_PATCH_DIR = (
     pathlib.Path(__file__).parents[2] / "vllm_sail" / "patch" / "enhancement" / "models"
 )
@@ -377,3 +379,29 @@ def test_reapplication_raises(installed_model_patches) -> None:
         )
         def custom_routing_function(*args, **kwargs):
             raise AssertionError("must not install")
+
+
+@pytest.mark.upstream_source
+@pytest.mark.parametrize(
+    "local,local_name,upstream,upstream_name",
+    [
+        (
+            "models/deepseek_v4_compressor",
+            "__init__",
+            "models/deepseek_v4/compressor",
+            "DeepseekCompressor.__init__",
+        ),
+        (
+            "models/deepseek_v4_cache",
+            "dequantize_and_gather_k_cache",
+            "models/deepseek_v4/common/ops/cache_utils",
+            "dequantize_and_gather_k_cache",
+        ),
+    ],
+)
+def test_replacements_accept_upstream_keywords(
+    upstream_source_root, local, local_name, upstream, upstream_name
+):
+    assert_accepts_upstream_keywords(
+        local, local_name, upstream_source_root, upstream, upstream_name
+    )

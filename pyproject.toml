@@ -96,6 +96,7 @@ testpaths = ["tests"]
 pythonpath = ["."]
 markers = [
     "ppu: requires real PPU hardware (skipped when absent)",
+    "upstream_source: checks the source selected by VLLM_SOURCE_ROOT without importing vLLM",
 ]
 filterwarnings = ["ignore::DeprecationWarning"]
 

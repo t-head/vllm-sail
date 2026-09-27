@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.source import assert_accepts_upstream_keywords
+
 PATCH_PATH = (
     Path(__file__).parents[2] / "vllm_sail/patch/enhancement/attention/mla_indexer.py"
 )
@@ -75,3 +77,29 @@ def test_rebased_indexer_init_calls_parent_once(
     assert type(calls[0][0]) is builder_class
     assert calls[0][1:] == ((config,), {"device": "test-device"})
     assert replacement.__globals__ is target.__dict__
+
+
+@pytest.mark.upstream_source
+@pytest.mark.parametrize(
+    "local,local_name,upstream,upstream_name",
+    [
+        (
+            "attention/mla_indexer",
+            "_builder_init_body",
+            "v1/attention/backends/mla/indexer",
+            "DeepseekV32IndexerMetadataBuilder.__init__",
+        ),
+        (
+            "attention/mla_indexer",
+            "_split_indexer_prefill_chunks_body",
+            "v1/attention/backends/mla/indexer",
+            "DeepseekV32IndexerMetadataBuilder._split_indexer_prefill_chunks",
+        ),
+    ],
+)
+def test_replacements_accept_upstream_keywords(
+    upstream_source_root, local, local_name, upstream, upstream_name
+):
+    assert_accepts_upstream_keywords(
+        local, local_name, upstream_source_root, upstream, upstream_name
+    )
