@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+#
+# PPU end-to-end smoke test, executed inside the PPU pod dispatched by
+# t-head/ppu-scheduler-action. It installs the CI-built vLLM and vLLM SAIL
+# wheels, self-checks the SAIL platform, serves a model from the auto-mounted
+# NAS checkpoint, and verifies one chat completion request end to end.
+#
+# Environment contract (injected via the action's extra_env):
+#   MODEL_PATH          absolute checkpoint path (under the auto-mounted NAS)
+#   SERVED_NAME         served-model-name exposed by vLLM
+#   TP_SIZE             tensor-parallel size (matches the pod's PPU card count)
+#   WHEELS_DIR          directory holding the downloaded *.whl artifacts
+#   EXTRA_SERVE_FLAGS   optional extra flags forwarded to `vllm serve`
+#   VLLM_VERSION        vLLM release the SAIL compat gate should accept (0.27.1)
+#   GPU_MEM_UTIL        optional gpu-memory-utilization (default 0.9)
+#   MAX_MODEL_LEN       optional max-model-len (default 8192)
+#   SERVE_PORT          optional serve port (default 9985)
+#   READY_TIMEOUT_SECS  optional readiness budget in seconds (default 1200)
+set -Eeuo pipefail
+
+MODEL_PATH="${MODEL_PATH:?MODEL_PATH is required}"
+WHEELS_DIR="${WHEELS_DIR:?WHEELS_DIR is required}"
+SERVED_NAME="${SERVED_NAME:-model}"
+TP_SIZE="${TP_SIZE:-1}"
+EXTRA_SERVE_FLAGS="${EXTRA_SERVE_FLAGS:-}"
+GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.9}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
+SERVE_PORT="${SERVE_PORT:-9985}"
+SERVE_HOST="127.0.0.1"
+READY_TIMEOUT_SECS="${READY_TIMEOUT_SECS:-1200}"
+SERVE_LOG="/tmp/vllm_serve.log"
+
+# The internal HTTP(S) proxies do not route to the loopback serve endpoint.
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY || true
+
+log() { printf '\n=== %s ===\n' "$1"; }
+
+log "environment"
+echo "MODEL_PATH=${MODEL_PATH}"
+echo "SERVED_NAME=${SERVED_NAME} TP_SIZE=${TP_SIZE} PORT=${SERVE_PORT}"
+python -c 'import sys; print("python", sys.version)'
+
+log "install wheels"
+# Match the vLLM wheel first, excluding the vllm_sail wheel (underscore prefix).
+mapfile -t vllm_wheels < <(
+    find "${WHEELS_DIR}" -type f -name 'vllm-*.whl' -print | sort
+)
+mapfile -t sail_wheels < <(
+    find "${WHEELS_DIR}" -type f -name 'vllm_sail-*.whl' -print | sort
+)
+((${#vllm_wheels[@]} >= 1)) || { echo "no vLLM wheel under ${WHEELS_DIR}"; exit 1; }
+((${#sail_wheels[@]} >= 1)) || { echo "no vLLM SAIL wheel under ${WHEELS_DIR}"; exit 1; }
+echo "vllm wheel: ${vllm_wheels[0]}"
+echo "sail wheel: ${sail_wheels[0]}"
+# --no-deps keeps the SAIL-built torch/native ABI in the image untouched;
+# --force-reinstall guarantees the freshly built wheels win over any preinstall.
+python -m pip install --no-deps --force-reinstall "${vllm_wheels[0]}"
+python -m pip install --no-deps --force-reinstall "${sail_wheels[0]}"
+
+log "collect_env"
+python -c "from vllm_sail import collect_env; collect_env()"
+
+log "checkpoint"
+test -d "${MODEL_PATH}" || { echo "checkpoint dir missing: ${MODEL_PATH}"; exit 1; }
+test -f "${MODEL_PATH}/config.json" || { echo "config.json missing in checkpoint"; exit 1; }
+ls -la "${MODEL_PATH}" | head -n 20
+
+log "serve"
+# CI-built wheels report a setuptools_scm dev version the SAIL compat gate
+# refuses; VLLM_VERSION pins the supported release so the plugin loads.
+export VLLM_VERSION="${VLLM_VERSION:-0.27.1}"
+# shellcheck disable=SC2086
+nohup vllm serve "${MODEL_PATH}" \
+    --served-model-name "${SERVED_NAME}" \
+    --host "${SERVE_HOST}" --port "${SERVE_PORT}" \
+    --tensor-parallel-size "${TP_SIZE}" \
+    --gpu-memory-utilization "${GPU_MEM_UTIL}" \
+    --max-model-len "${MAX_MODEL_LEN}" \
+    ${EXTRA_SERVE_FLAGS} \
+    >"${SERVE_LOG}" 2>&1 &
+SERVE_PID=$!
+
+cleanup() {
+    kill "${SERVE_PID}" 2>/dev/null || true
+    wait "${SERVE_PID}" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+log "wait for readiness"
+ready=0
+deadline=$((SECONDS + READY_TIMEOUT_SECS))
+# Only genuine fatal markers; benign lines such as the stubbed
+# "compute ops raise NotImplementedError" must not trip the failure detector.
+fatal_re='Traceback \(most recent|EngineCore failed|Engine core initialization failed|core dumped|Failed to infer device type|Error: model architectures'
+while ((SECONDS < deadline)); do
+    if ! kill -0 "${SERVE_PID}" 2>/dev/null; then
+        echo "serve process exited before becoming ready"
+        tail -n 200 "${SERVE_LOG}" || true
+        exit 1
+    fi
+    if grep -qE 'Application startup complete' "${SERVE_LOG}"; then
+        ready=1
+        break
+    fi
+    if grep -qE "${fatal_re}" "${SERVE_LOG}"; then
+        echo "fatal error detected in serve log"
+        tail -n 200 "${SERVE_LOG}" || true
+        exit 1
+    fi
+    sleep 5
+done
+if ((ready == 0)); then
+    echo "server not ready within ${READY_TIMEOUT_SECS}s"
+    tail -n 200 "${SERVE_LOG}" || true
+    exit 1
+fi
+
+log "chat completion request"
+request_body=$(cat <<JSON
+{"model": "${SERVED_NAME}",
+ "messages": [{"role": "user", "content": "简单说一下什么是投机采样"}],
+ "max_completion_tokens": 100,
+ "top_k": 1}
+JSON
+)
+response=$(curl -sS -X POST "http://${SERVE_HOST}:${SERVE_PORT}/v1/chat/completions" \
+    -H 'Content-Type: application/json' \
+    -d "${request_body}")
+echo "${response}"
+echo "${response}" | python -c '
+import json, sys
+data = json.load(sys.stdin)
+content = data["choices"][0]["message"]["content"]
+assert content and content.strip(), "empty completion content"
+print(f"completion OK, {len(content)} chars")
+'
+
+log "ppu-smi occupancy evidence"
+ppu-smi || true
+
+log "E2E SMOKE PASS"

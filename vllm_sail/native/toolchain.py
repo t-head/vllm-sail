@@ -39,6 +39,10 @@ DEFAULT_HG_STANDARD = "20"
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
+# Sentinel so ``build_parallelism`` can tell "cpu_count omitted" (query the OS)
+# apart from an explicit ``None`` (the count is unknown).
+_UNSET = object()
+
 
 def _truthy(env: Mapping[str, str], name: str) -> bool:
     return env.get(name, "").strip().lower() in _TRUTHY
@@ -104,6 +108,34 @@ def skip_requested(env: Mapping[str, str] | None = None) -> bool:
     """Return whether the caller explicitly requested a Python-only package."""
     env = os.environ if env is None else env
     return _truthy(env, "VLLM_SAIL_SKIP_EXT")
+
+
+def build_parallelism(
+    explicit: int | None = None,
+    env: Mapping[str, str] | None = None,
+    cpu_count: int | None | object = _UNSET,
+) -> int:
+    """Decide the ``cmake --build --parallel`` level for the native build.
+
+    Native PPU kernels are memory-heavy (~GiB per compile job). A many-core
+    CPU runner with a smaller memory limit OOM-kills the pod (exit 137) if the
+    build fans out to ``os.cpu_count()``. Honour ``MAX_JOBS`` -- the same knob
+    vLLM's own build reads, and the one this repo's CI exports -- so the cap is
+    actually applied. Precedence: an explicit setuptools ``-j`` wins, then
+    ``MAX_JOBS``, then the CPU count, then a single job.
+
+    ``cpu_count`` defaults to ``os.cpu_count()`` when omitted; pass it (even
+    ``None``) to override, where ``None`` means the count is unknown.
+    """
+    if explicit:
+        return explicit
+    env = os.environ if env is None else env
+    raw = env.get("MAX_JOBS", "").strip()
+    if raw.isdigit() and int(raw) > 0:
+        return int(raw)
+    if cpu_count is _UNSET:
+        cpu_count = os.cpu_count()
+    return cpu_count or 1  # type: ignore[return-value]
 
 
 def find_hgcc(env: Mapping[str, str] | None = None) -> str | None:

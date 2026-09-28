@@ -47,6 +47,9 @@ compile_commands.json
 .ninja_log
 /cmake-build-*/
 
+# Local and CI wheel build outputs.
+/artifacts/
+
 # Generated local tuning results; reviewed package configs are tracked separately.
 /benchmarks/kernels/fusedmoe_tuning_tools/*.json
 /benchmarks/kernels/fusedmoe_tuning_tools/*.csv
