@@ -9,6 +9,22 @@ The initial path supports BF16 Q/K/V, BF16 index K, FP32 index scores,
 execution. Index heads must equal KV heads. Speculative decoding, FP8 caches,
 and graph capture are rejected when this path is selected.
 
+## vLLM integration
+
+The SAIL backends extend vLLM's MiniMax indexer and sparse-attention interfaces.
+Their builders reuse upstream decode/prefill metadata and add per-chunk CPU
+lengths, physical page indices and causal page counts once per cache group and
+forward. All layers in the group reuse those tensors. The indexer takes its
+rank-local head count from the upstream builder; attention uses its KV-cache
+specification. Cache allocation, cache writes and the shared top-k buffer stay
+under vLLM's existing model and cache interfaces.
+
+The indexer and attention have separate execution entry points. Each consumes
+prepared metadata and calls the PPU kernels. PPU-specific handling is limited
+to score-memory chunking, library API/cache views and planner/JIT lifetimes.
+Plans still must be created immediately before execution because the library
+may share planner workspaces; the builder does not retain those plans.
+
 ## Prepare the environment
 
 Use vLLM 0.30 and install vLLM SAIL following the

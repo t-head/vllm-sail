@@ -15,6 +15,10 @@ import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import torch
 
 PAGE_SIZE = 128
 TOPK = 16
@@ -256,28 +260,52 @@ def sorted_blocks(topk, pages):
     return values.masked_fill(values == sentinel, -1).contiguous()
 
 
-def run_chunks(
-    *,
-    query,
-    key,
-    value,
-    block_table,
-    chunks,
-    scale,
-    topk,
-    output=None,
-    init_blocks=0,
-    local_blocks=0,
-):
-    """Run OnlyScore/top-k or sparse attend, consuming each eager plan immediately.
+@dataclass
+class MSAChunkMetadata:
+    """Batch inputs prepared by a vLLM builder and reused by every layer.
 
-    PPU MSA accepts both [tokens, index_heads, topk] and
-    [index_heads, tokens, topk]. Keep the model's token-major shared buffer:
-    top-k selection writes into its slices and sparse attend consumes that same
-    layout after block-id sorting, without a layout conversion. No plans or
-    score tensors accumulate across chunks or layers. Main and index callers
-    supply their own physical block tables.
+    Plans are deliberately absent: the PPU library may return views into shared
+    planner workspaces, so each layer must plan immediately before execution.
     """
+
+    start: int
+    end: int
+    qo_lens: torch.Tensor  # CPU, int32
+    kv_lens: torch.Tensor  # CPU, int32
+    page_table: torch.Tensor  # Flat physical page ids for this cache group.
+    num_valid_pages: torch.Tensor  # Per-query causal page counts.
+    max_k_tiles: int
+
+
+def prepare_chunks(
+    chunks: list[list[Segment]], block_table: torch.Tensor
+) -> list[MSAChunkMetadata]:
+    """Materialize batch-dependent tensors once, outside layer forwards."""
+    import torch
+
+    return [
+        MSAChunkMetadata(
+            start=chunk[0].start,
+            end=chunk[-1].start + chunk[-1].length,
+            qo_lens=torch.tensor(
+                [s.length for s in chunk], dtype=torch.int32, device="cpu"
+            ),
+            kv_lens=torch.tensor(
+                [s.kv_length for s in chunk], dtype=torch.int32, device="cpu"
+            ),
+            page_table=torch.cat(
+                [block_table[s.request, : (s.kv_length + 127) // 128] for s in chunk]
+            )
+            .to(torch.int32)
+            .contiguous(),
+            num_valid_pages=causal_pages(chunk, block_table.device),
+            max_k_tiles=aligned_k_tiles(max(s.kv_length for s in chunk)),
+        )
+        for chunk in chunks
+    ]
+
+
+def _validate_inputs(query, key, value, topk) -> None:
     import torch
 
     if torch.cuda.is_current_stream_capturing():
@@ -288,73 +316,96 @@ def run_chunks(
         raise ValueError("MSA requires a token-major int32 top-k buffer")
     if key.shape != value.shape or key.shape[1] != 128 or key.shape[-1] != 128:
         raise ValueError("MSA requires NHD K/V views [pages, 128, heads, 128]")
+
+
+def _plan(msa, chunk: MSAChunkMetadata, query, key, *, only_score: bool):
+    return msa.fmha_sm100_plan(
+        chunk.qo_lens,
+        chunk.kv_lens,
+        query.shape[1],
+        num_kv_heads=key.shape[2],
+        page_size=PAGE_SIZE,
+        kv_block_num=-1 if only_score else TOPK,
+        num_kv_splits=-1,
+        output_maxscore=only_score,
+        causal=True,
+        device=query.device,
+    )
+
+
+def run_indexer(
+    *,
+    query,
+    key,
+    chunks: list[MSAChunkMetadata],
+    scale,
+    topk,
+    init_blocks=0,
+    local_blocks=0,
+) -> None:
+    """Score and select directly into vLLM's shared token-major top-k buffer."""
+    import torch
+
+    _validate_inputs(query, key, key, topk)
     msa = load_msa()
-    only_score = output is None
     for chunk in chunks:
-        begin, end = chunk[0].start, chunk[-1].start + chunk[-1].length
-        qo_lens = torch.tensor([s.length for s in chunk], dtype=torch.int32)
-        kv_lens = torch.tensor([s.kv_length for s in chunk], dtype=torch.int32)
-        indices = (
-            torch.cat(
-                [block_table[s.request, : (s.kv_length + 127) // 128] for s in chunk]
-            )
-            .to(torch.int32)
-            .contiguous()
-        )
-        # No later plan is built until this one has been consumed. The library's
-        # shared eager planner workspace can therefore be safely reused.
-        plan = msa.fmha_sm100_plan(
-            qo_lens,
-            kv_lens,
-            query.shape[1],
-            num_kv_heads=key.shape[2],
-            page_size=128,
-            kv_block_num=-1 if only_score else TOPK,
-            num_kv_splits=-1,
-            output_maxscore=only_score,
-            causal=True,
+        begin, end = chunk.start, chunk.end
+        plan = _plan(msa, chunk, query, key, only_score=True)
+        scores = torch.full(
+            (query.shape[1], chunk.max_k_tiles, end - begin),
+            -float("inf"),
+            dtype=torch.float32,
             device=query.device,
         )
-        pages = causal_pages(chunk, query.device)
-        if only_score:
-            scores = torch.full(
-                (
-                    query.shape[1],
-                    aligned_k_tiles(max(s.kv_length for s in chunk)),
-                    end - begin,
-                ),
-                -float("inf"),
-                dtype=torch.float32,
-                device=query.device,
-            )
-            msa.fmha_sm100(
-                query[begin:end],
-                key,
-                value,
-                plan,
-                kv_indices=indices,
-                output_o=False,
-                output_maxscore=True,
-                max_score=scores,
-                sm_scale=scale,
-            )
-            force_local_scores(scores, pages, init_blocks, local_blocks)
-            selected = topk[begin:end]
-            msa.sparse_topk_select(
-                scores, TOPK, num_valid_pages=scores.shape[1], output=selected
-            )
-            selected.masked_fill_(selected >= pages[:, None, None], -1)
-            del scores
-        else:
-            blocks = sorted_blocks(topk[begin:end], pages)
-            msa.fmha_sm100(
-                query[begin:end],
-                key,
-                value,
-                plan,
-                kv_indices=indices,
-                kv_block_indexes=blocks,
-                out=output[begin:end],
-                sm_scale=scale,
-                output_maxscore=False,
-            )
+        msa.fmha_sm100(
+            query[begin:end],
+            key,
+            key,
+            plan,
+            kv_indices=chunk.page_table,
+            output_o=False,
+            output_maxscore=True,
+            max_score=scores,
+            sm_scale=scale,
+        )
+        force_local_scores(scores, chunk.num_valid_pages, init_blocks, local_blocks)
+        selected = topk[begin:end]
+        msa.sparse_topk_select(
+            scores, TOPK, num_valid_pages=scores.shape[1], output=selected
+        )
+        selected.masked_fill_(selected >= chunk.num_valid_pages[:, None, None], -1)
+        del scores
+
+
+def run_sparse_attention(
+    *,
+    query,
+    key,
+    value,
+    chunks: list[MSAChunkMetadata],
+    scale,
+    topk,
+    output,
+) -> None:
+    """Attend using vLLM's token-major top-k layout without a transpose.
+
+    PPU MSA accepts both [tokens, index_heads, topk] and
+    [index_heads, tokens, topk]. Sorting logical block ids preserves the layout.
+    """
+    _validate_inputs(query, key, value, topk)
+    msa = load_msa()
+    for chunk in chunks:
+        begin, end = chunk.start, chunk.end
+        plan = _plan(msa, chunk, query, key, only_score=False)
+        blocks = sorted_blocks(topk[begin:end], chunk.num_valid_pages)
+        msa.fmha_sm100(
+            query[begin:end],
+            key,
+            value,
+            plan,
+            kv_indices=chunk.page_table,
+            kv_block_indexes=blocks,
+            out=output[begin:end],
+            sm_scale=scale,
+            output_maxscore=False,
+        )

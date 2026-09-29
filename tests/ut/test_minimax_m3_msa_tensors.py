@@ -21,10 +21,13 @@ from vllm_sail.attention import msa  # noqa: E402
 class EagerMSA:
     def __init__(self):
         self.plan_live = False
+        self.plan_inputs = []
+        self.page_tables = []
 
     def fmha_sm100_plan(self, qo, kv, heads, **kwargs):
         assert not self.plan_live, "a later plan overwrote an unconsumed workspace"
         self.plan_live = True
+        self.plan_inputs.append((qo, kv))
         return qo.tolist(), kv.tolist()
 
     def fmha_sm100(
@@ -43,6 +46,7 @@ class EagerMSA:
         out=None,
     ):
         qo, kv = plan
+        self.page_tables.append(kv_indices)
         assert self.plan_live
         self.plan_live = False
         q0, page0 = 0, 0
@@ -84,12 +88,12 @@ def test_complete_adapter_with_independent_cache_tables(
     # Three tokens/chunk forces splits within requests and across page boundaries.
     chunks = msa.make_chunks(starts, lengths, 2, 3 * 2048)
     topk = torch.full((q.shape[0] + 4, 2, 16), -99, dtype=torch.int32)
-    msa.run_chunks(
+    index_chunks = msa.prepare_chunks(chunks, it)
+    main_chunks = msa.prepare_chunks(chunks, mt)
+    msa.run_indexer(
         query=iq,
         key=ik,
-        value=ik,
-        block_table=it,
-        chunks=chunks,
+        chunks=index_chunks,
         scale=128**-0.5,
         topk=topk,
         init_blocks=1,
@@ -102,18 +106,71 @@ def test_complete_adapter_with_independent_cache_tables(
     assert k.untyped_storage().data_ptr() == kv.untyped_storage().data_ptr()
     assert v.untyped_storage().data_ptr() == kv.untyped_storage().data_ptr()
     output = torch.empty_like(q)
-    msa.run_chunks(
+    msa.run_sparse_attention(
         query=q,
         key=k,
         value=v,
-        block_table=mt,
-        chunks=chunks,
+        chunks=main_chunks,
         scale=128**-0.5,
         topk=topk,
         output=output,
     )
     ref = attend_reference(q, k, v, mt, starts, lengths, expected, 128**-0.5)
     torch.testing.assert_close(output, ref, atol=0, rtol=0)
+
+
+def test_batch_metadata_reused_across_layers(monkeypatch):
+    library = EagerMSA()
+    monkeypatch.setattr(msa, "load_msa", lambda: library)
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+    starts, lengths, iq, q, ik, kv, it, mt = make_case("cpu", [1, 1, 1])
+    segments = msa.make_chunks(starts, lengths, 2, 2 * 2048)
+    index_chunks = msa.prepare_chunks(segments, it)
+    main_chunks = msa.prepare_chunks(segments, mt)
+    chunks = index_chunks + main_chunks
+    tensors = [
+        t
+        for c in chunks
+        for t in (c.qo_lens, c.kv_lens, c.page_table, c.num_valid_pages)
+    ]
+    snapshots = [t.clone() for t in tensors]
+    k, v = msa.main_kv_views(kv)
+    topk = torch.empty(q.shape[0], 2, 16, dtype=torch.int32)
+    output = torch.empty_like(q)
+    # Different layer queries share batch metadata, but must not share scores,
+    # top-k contents or unconsumed plans.
+    for sign in (1, -1):
+        msa.run_indexer(
+            query=sign * iq,
+            key=ik,
+            chunks=index_chunks,
+            scale=128**-0.5,
+            topk=topk,
+            init_blocks=1,
+            local_blocks=1,
+        )
+        expected = topk_reference(sign * iq, ik, it, starts, lengths)
+        assert torch.equal(topk.sort(-1).values, expected.sort(-1).values)
+        msa.run_sparse_attention(
+            query=sign * q,
+            key=k,
+            value=v,
+            chunks=main_chunks,
+            scale=128**-0.5,
+            topk=topk,
+            output=output,
+        )
+        reference = attend_reference(
+            sign * q, k, v, mt, starts, lengths, expected, 128**-0.5
+        )
+        torch.testing.assert_close(output, reference, atol=0, rtol=0)
+    for (qo, kl), table, chunk in zip(
+        library.plan_inputs, library.page_tables, chunks * 2, strict=True
+    ):
+        assert qo is chunk.qo_lens and kl is chunk.kv_lens
+        assert table is chunk.page_table
+    for tensor, snapshot in zip(tensors, snapshots, strict=True):
+        assert torch.equal(tensor, snapshot)
 
 
 def test_forced_windows_and_invalid_topk():
@@ -134,11 +191,9 @@ def test_forced_windows_and_invalid_topk():
 def test_capture_is_rejected(monkeypatch):
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
     with pytest.raises(RuntimeError, match="enforce-eager"):
-        msa.run_chunks(
+        msa.run_indexer(
             query=None,
             key=None,
-            value=None,
-            block_table=None,
             chunks=[],
             scale=1,
             topk=None,

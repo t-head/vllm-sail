@@ -21,12 +21,12 @@ def test_sail_msa_index_and_attend(layout, query_lens):
     starts, lengths, iq, q, ik, kv, it, mt = make_case("cuda", query_lens, layout)
     chunks = msa.make_chunks(starts, lengths, 2, 64 * 2048)
     topk = torch.full((q.shape[0] + 4, 2, 16), -99, dtype=torch.int32, device="cuda")
-    msa.run_chunks(
+    index_chunks = msa.prepare_chunks(chunks, it)
+    main_chunks = msa.prepare_chunks(chunks, mt)
+    msa.run_indexer(
         query=iq,
         key=ik,
-        value=ik,
-        block_table=it,
-        chunks=chunks,
+        chunks=index_chunks,
         scale=128**-0.5,
         topk=topk,
         init_blocks=1,
@@ -39,12 +39,11 @@ def test_sail_msa_index_and_attend(layout, query_lens):
     assert torch.all(topk[q.shape[0] :] == -99)
     k, v = msa.main_kv_views(kv)
     out = torch.empty_like(q)
-    msa.run_chunks(
+    msa.run_sparse_attention(
         query=q,
         key=k,
         value=v,
-        block_table=mt,
-        chunks=chunks,
+        chunks=main_chunks,
         scale=128**-0.5,
         topk=topk,
         output=out,

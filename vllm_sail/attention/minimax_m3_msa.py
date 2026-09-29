@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import ClassVar
 
 import torch
+from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.models.minimax_m3.common.indexer import (
@@ -20,27 +22,41 @@ from vllm.models.minimax_m3.common.sparse_attention import (
     MiniMaxM3SparseMetadata,
     MiniMaxM3SparseMetadataBuilder,
 )
-from vllm.v1.attention.backend import AttentionCGSupport
+from vllm.v1.attention.backend import (
+    AttentionCGSupport,
+    AttentionLayer,
+    CommonAttentionMetadata,
+)
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_sail import envs
-from vllm_sail.attention.msa import Segment, main_kv_views, make_chunks, run_chunks
+from vllm_sail.attention.msa import (
+    MSAChunkMetadata,
+    main_kv_views,
+    make_chunks,
+    prepare_chunks,
+    run_indexer,
+    run_sparse_attention,
+)
 
 logger = init_logger(__name__)
 
 
 @dataclass
 class SAILIndexerMetadata(MiniMaxM3IndexerMetadata):
-    sail_msa_chunks: list[list[Segment]] = field(default_factory=list)
-    sail_msa_block_table: torch.Tensor | None = None
+    msa_chunks: list[MSAChunkMetadata] = field(default_factory=list)
 
 
 @dataclass
 class SAILSparseMetadata(MiniMaxM3SparseMetadata):
-    sail_msa_chunks: list[list[Segment]] = field(default_factory=list)
-    sail_msa_block_table: torch.Tensor | None = None
+    msa_chunks: list[MSAChunkMetadata] = field(default_factory=list)
 
 
-def _schedule(builder, common):
+def _build_msa_chunks(
+    common: CommonAttentionMetadata,
+    num_index_heads: int,
+    budget_bytes: int,
+) -> list[MSAChunkMetadata]:
     """Snapshot real eager lengths once per cache-group metadata build."""
     num_reqs = common.num_reqs
     starts = common.query_start_loc_cpu[: num_reqs + 1].tolist()
@@ -49,72 +65,101 @@ def _schedule(builder, common):
         raise ValueError("MSA query offsets disagree with num_actual_tokens")
     if common.block_table_tensor.shape[1] * 128 < max(lengths, default=0):
         raise ValueError("MSA block table is too short for the sequence lengths")
-    return make_chunks(starts, lengths, builder.sail_index_heads, builder.sail_budget)
-
-
-def _init_schedule(builder, config):
-    sparse = config.model_config.hf_text_config.sparse_attention_config
-    tp = config.parallel_config.tensor_parallel_size
-    builder.sail_index_heads = max(1, sparse["sparse_num_index_heads"] // tp)
-    builder.sail_budget = envs.VLLM_SAIL_MINIMAX_M3_MSA_INDEXER_MEM_BUDGET_MB * 1024**2
-    if builder.kv_cache_spec.block_size != 128:
-        raise ValueError("SAIL MiniMax MSA requires 128-token cache pages")
+    segments = make_chunks(starts, lengths, num_index_heads, budget_bytes)
+    return prepare_chunks(segments, common.block_table_tensor)
 
 
 class SAILIndexerMetadataBuilder(MiniMaxM3IndexerTritonMetadataBuilder):
-    _cudagraph_support = AttentionCGSupport.NEVER
+    """Extend common MiniMax metadata with PPU MSA inputs shared across layers."""
 
-    def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.NEVER
+
+    def __init__(
+        self,
+        kv_cache_spec: AttentionSpec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+    ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        _init_schedule(self, vllm_config)
+        self.msa_budget_bytes = (
+            envs.VLLM_SAIL_MINIMAX_M3_MSA_INDEXER_MEM_BUDGET_MB * 1024**2
+        )
+        if kv_cache_spec.block_size != 128:
+            raise ValueError("SAIL MiniMax MSA requires 128-token cache pages")
 
-    def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> SAILIndexerMetadata:
         md = super().build(common_prefix_len, common_attn_metadata, fast_build)
         return SAILIndexerMetadata(
             **vars(md),
-            sail_msa_chunks=_schedule(self, common_attn_metadata),
-            sail_msa_block_table=common_attn_metadata.block_table_tensor,
+            msa_chunks=_build_msa_chunks(
+                common_attn_metadata, self.num_index_heads, self.msa_budget_bytes
+            ),
         )
 
 
 class SAILSparseMetadataBuilder(MiniMaxM3SparseMetadataBuilder):
-    _cudagraph_support = AttentionCGSupport.NEVER
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.NEVER
 
-    def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
+    def __init__(
+        self,
+        kv_cache_spec: AttentionSpec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+    ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        _init_schedule(self, vllm_config)
+        # The supported configuration has one index head per KV head. Use the
+        # rank-local cache spec rather than re-deriving the TP head partition.
+        self.num_index_heads = kv_cache_spec.num_kv_heads
+        self.msa_budget_bytes = (
+            envs.VLLM_SAIL_MINIMAX_M3_MSA_INDEXER_MEM_BUDGET_MB * 1024**2
+        )
+        if kv_cache_spec.block_size != 128:
+            raise ValueError("SAIL MiniMax MSA requires 128-token cache pages")
 
-    def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> SAILSparseMetadata:
         md = super().build(common_prefix_len, common_attn_metadata, fast_build)
         return SAILSparseMetadata(
             **vars(md),
-            sail_msa_chunks=_schedule(self, common_attn_metadata),
-            sail_msa_block_table=common_attn_metadata.block_table_tensor,
+            msa_chunks=_build_msa_chunks(
+                common_attn_metadata, self.num_index_heads, self.msa_budget_bytes
+            ),
         )
 
 
 class SAILIndexerBackend(MiniMaxM3IndexerBackend):
     @staticmethod
-    def get_builder_cls():
+    def get_builder_cls() -> type[SAILIndexerMetadataBuilder]:
         return SAILIndexerMetadataBuilder
 
     @staticmethod
-    def get_impl_cls():
+    def get_impl_cls() -> type[SAILIndexerImpl]:
         return SAILIndexerImpl
 
 
 class SAILSparseBackend(MiniMaxM3SparseBackend):
     @staticmethod
-    def get_builder_cls():
+    def get_builder_cls() -> type[SAILSparseMetadataBuilder]:
         return SAILSparseMetadataBuilder
 
     @staticmethod
-    def get_impl_cls():
+    def get_impl_cls() -> type[SAILSparseImpl]:
         return SAILSparseImpl
 
 
 class SAILIndexerImpl(MiniMaxM3IndexerImpl):
-    indexer_backend_cls = SAILIndexerBackend
+    indexer_backend_cls: ClassVar[type[SAILIndexerBackend]] = SAILIndexerBackend
 
     def __init__(self, **kwargs):
         if kwargs["index_head_dim"] != 128:
@@ -130,11 +175,15 @@ class SAILIndexerImpl(MiniMaxM3IndexerImpl):
         super().__init__(**kwargs)
         logger.info_once("MiniMax M3 indexer selected SAIL MSA (BF16, eager)")
 
-    def forward(self, index_query):
+    def forward(
+        self,
+        index_query: torch.Tensor,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         metadata = get_forward_context().attn_metadata
         if not isinstance(metadata, dict):
             return None, None
         md = metadata[self.index_cache.prefix]
+        assert isinstance(md, SAILIndexerMetadata)
         n = md.num_actual_tokens
         if not n:
             return None, None
@@ -151,12 +200,10 @@ class SAILIndexerImpl(MiniMaxM3IndexerImpl):
             or not topk.is_contiguous()
         ):
             raise ValueError("MSA top-k buffer must be token-major int32 [T,H,16]")
-        run_chunks(
+        run_indexer(
             query=query,
             key=key,
-            value=key,
-            block_table=md.sail_msa_block_table,
-            chunks=md.sail_msa_chunks,
+            chunks=md.msa_chunks,
             scale=self.scale,
             topk=topk,
             init_blocks=self.init_blocks,
@@ -172,21 +219,29 @@ class SAILSparseImpl(MiniMaxM3SparseImpl):
             raise ValueError("unsupported SAIL MSA head size/count")
         logger.info_once("MiniMax M3 attention selected SAIL MSA (BF16, eager)")
 
-    def forward(self, layer, query, kv_cache, output, *, query_fp8=None):
+    def forward(
+        self,
+        layer: AttentionLayer,
+        query: torch.Tensor,
+        kv_cache: torch.Tensor,
+        output: torch.Tensor,
+        *,
+        query_fp8: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         metadata = get_forward_context().attn_metadata
         if not isinstance(metadata, dict):
             return output
         md = metadata[layer.layer_name]
+        assert isinstance(md, SAILSparseMetadata)
         n = md.num_actual_tokens
         if not n:
             return output
         k, v = main_kv_views(kv_cache)
-        run_chunks(
+        run_sparse_attention(
             query=query[:n].view(n, self.num_heads, 128),
             key=k,
             value=v,
-            block_table=md.sail_msa_block_table,
-            chunks=md.sail_msa_chunks,
+            chunks=md.msa_chunks,
             scale=self.scale,
             topk=layer.topk_indices_buffer,
             output=output[:n].view(n, self.num_heads, 128),
