@@ -31,7 +31,6 @@ jobs:
           - vllm-main-verified.commit
     env:
       WHEELS_DIR: /tmp/ppu-wheels
-      ARTIFACT_DIR: /tmp/ppu-pin-ut
       VLLM_USE_RUST_FRONTEND: "0"
       VLLM_USE_RUST_BENCH: "0"
     defaults:
@@ -112,39 +111,27 @@ jobs:
               output.write(summary + "\n")
           PYTHON
 
-      - name: Install wheels into the fresh SAIL runtime
+      - name: Run pin UT in a fresh single-card PPU container
         if: steps.manifest.outputs.matches == 'true'
-        run: |
-          # Keep the runtime image's SDK/PyTorch and their matching dependencies.
-          # Only replace vLLM and the plugin, as in the E2E smoke.
-          python -m pip install --no-deps --force-reinstall "${WHEELS_DIR}"/vllm/*.whl "${WHEELS_DIR}"/vllm-sail/*.whl
-          PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
-            python -m pip install -r requirements/dev.txt
-          unset VLLM_VERSION PYTHONPATH
-          cd /tmp
-          python - <<'PYTHON'
-          import torch
-          import vllm
-          import vllm_sail
-          from vllm_sail.compat import check_vllm_compatibility
-          from vllm.platforms import current_platform
-
-          check_vllm_compatibility(force=True)
-          assert current_platform.is_ppu(), current_platform
-          print("SAIL PyTorch:", torch.__version__, torch.__file__)
-          print("vLLM:", vllm.__file__)
-          print("vLLM SAIL:", vllm_sail.__file__)
-          print("Platform:", type(current_platform).__name__)
-          PYTHON
-
-      - name: Run compatibility UT beside the built vLLM
-        if: steps.manifest.outputs.matches == 'true'
-        run: |
-          unset VLLM_VERSION
-          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
-          mkdir -p "${ARTIFACT_DIR}"
-          python -m pytest tests/ut -q -rs -m "not upstream_source and not ppu" \
-            --junitxml="${ARTIFACT_DIR}/pin-ut.xml" 2>&1 | tee "${ARTIFACT_DIR}/pin-ut.log"
+        uses: t-head/ppu-scheduler-action@main
+        with:
+          image: ${{ inputs.image }}
+          nnodes: 0
+          nproc_per_node: 1
+          namespace: ppu-sched
+          node_selector: board-type=OAM-810E
+          timeout_minutes: 20
+          cleanup_policy: always
+          job_suffix: ${{ matrix.pin-file }}
+          source_dir: /workspace/source
+          artifact_paths: ${{ env.WHEELS_DIR }}
+          extra_env: WHEELS_DIR=/workspace/source/ppu-wheels,UT_RESULTS_DIR=/mnt/wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/pin-ut-${{ matrix.pin-file }},VLLM_USE_RUST_FRONTEND=0,VLLM_USE_RUST_BENCH=0
+          container_options: |
+            privileged: true
+            host_ipc: true
+            host_network: true
+            shm_size: 8Gi
+          command: cd /workspace/source && bash scripts/ci/ppu_pin_ut.sh
 
       - name: Upload pin UT diagnostics
         if: always()
@@ -152,8 +139,8 @@ jobs:
         with:
           name: ppu-pin-${{ matrix.pin-file }}-${{ github.run_id }}
           path: |
-            ${{ env.ARTIFACT_DIR }}/pin-ut.log
-            ${{ env.ARTIFACT_DIR }}/pin-ut.xml
+            /wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/pin-ut-${{ matrix.pin-file }}/*.log
+            /wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/pin-ut-${{ matrix.pin-file }}/pin-ut.xml
             ${{ env.WHEELS_DIR }}/wheel-manifest.json
           if-no-files-found: warn
           retention-days: 14

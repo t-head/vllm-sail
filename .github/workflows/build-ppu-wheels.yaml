@@ -3,6 +3,11 @@ name: Build PPU wheels
 on:
   workflow_dispatch:
     inputs:
+      existing_build_run_id:
+        description: Reuse an existing ppu-wheels artifact for pin UT only (blank builds new wheels)
+        required: false
+        default: ""
+        type: string
       build_image:
         description: Build container image
         required: true
@@ -38,6 +43,7 @@ concurrency:
 
 jobs:
   build:
+    if: inputs.existing_build_run_id == ''
     name: Build vLLM and vLLM SAIL wheels
     runs-on: k8s-runner-group-cpu-thead
     timeout-minutes: 180
@@ -101,9 +107,10 @@ jobs:
   pin-unit-tests:
     name: Test built wheels in fresh SAIL containers
     needs: build
+    if: ${{ !cancelled() && (needs.build.result == 'success' || (needs.build.result == 'skipped' && inputs.existing_build_run_id != '')) }}
     permissions:
       contents: read
       actions: read
     uses: ./.github/workflows/ppu-pin-ut.yaml
     with:
-      build_run_id: ${{ github.run_id }}
+      build_run_id: ${{ inputs.existing_build_run_id || github.run_id }}
