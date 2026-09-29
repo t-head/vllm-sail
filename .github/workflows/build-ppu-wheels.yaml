@@ -97,3 +97,13 @@ jobs:
             artifacts/build-manifest.txt
           if-no-files-found: warn
           retention-days: 14
+
+  pin-unit-tests:
+    name: Test built wheels in fresh SAIL containers
+    needs: build
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/ppu-pin-ut.yaml
+    with:
+      build_run_id: ${{ github.run_id }}

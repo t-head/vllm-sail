@@ -1,0 +1,159 @@
+name: PPU pin unit tests
+
+on:
+  workflow_call:
+    inputs:
+      build_run_id:
+        description: Build PPU wheels run supplying ppu-wheels-<run_id>
+        required: true
+        type: string
+      image:
+        description: SAIL runtime image, as used by the E2E smoke
+        type: string
+        default: reg.docker.alibaba-inc.com/ai-tmp/llm:pytorch2.13.0-ubuntu24.04-cuda13.0-vllm0.27.0-py312-ppu202609111952
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  pin-unit-tests:
+    name: vLLM pin (${{ matrix.pin-file }})
+    runs-on: k8s-runner-group-cpu-thead
+    timeout-minutes: 30
+    container:
+      image: ${{ inputs.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        pin-file:
+          - vllm-release-tag.commit
+          - vllm-main-verified.commit
+    env:
+      WHEELS_DIR: /tmp/ppu-wheels
+      ARTIFACT_DIR: /tmp/ppu-pin-ut
+      VLLM_USE_RUST_FRONTEND: "0"
+      VLLM_USE_RUST_BENCH: "0"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Disable internal GitHub mirror rewrite
+        shell: bash
+        run: |
+          # The self-hosted CPU runner image ships a global/system git
+          # url.<internal-mirror>.insteadOf = https://github.com rewrite. Left in
+          # place it makes actions/checkout fetch from the internal mirror and
+          # fail, so strip only the github.com rewrites before checkout.
+          for scope in system global; do
+            echo "=== ${scope} insteadOf before ==="
+            git config --${scope} --get-regexp '^url\..*\.insteadof$' 2>/dev/null || true
+            while IFS= read -r section; do
+              [ -n "${section}" ] || continue
+              git config --${scope} --unset-all "${section}.insteadOf" 2>/dev/null || true
+            done < <(git config --${scope} --get-regexp '^url\..*\.insteadof$' 2>/dev/null | awk '$2 ~ /github\.com/ {sub(/\.insteadof$/, "", $1); print $1}')
+          done
+          echo "=== insteadOf after (system) ==="
+          git config --system --get-regexp '^url\..*\.insteadof$' 2>/dev/null || echo none
+          echo "=== insteadOf after (global) ==="
+          git config --global --get-regexp '^url\..*\.insteadof$' 2>/dev/null || echo none
+
+      - name: Check out vLLM SAIL
+        uses: actions/checkout@v4
+        with:
+          github-server-url: https://github.com
+
+      - name: Download CI-built wheels
+        uses: actions/download-artifact@v4
+        with:
+          name: ppu-wheels-${{ inputs.build_run_id }}
+          path: ${{ env.WHEELS_DIR }}
+          run-id: ${{ inputs.build_run_id }}
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+
+      - name: Verify wheel manifest and pin
+        id: manifest
+        env:
+          PIN_FILE: ${{ matrix.pin-file }}
+        run: |
+          python scripts/ci/ppu_wheel_manifest.py verify "${WHEELS_DIR}"
+          python - <<'PYTHON'
+          import json
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          manifest = json.loads((Path(os.environ["WHEELS_DIR"]) / "wheel-manifest.json").read_text())
+          pin = Path(".github", os.environ["PIN_FILE"]).read_text().strip()
+          if re.fullmatch(r"[0-9a-f]{40}", pin):
+              expected = pin
+          else:
+              # Release pins are tags; prefer the peeled commit for annotated tags.
+              tag = f"refs/tags/{pin}"
+              output = subprocess.check_output(
+                  ["git", "ls-remote", "--exit-code", "https://github.com/vllm-project/vllm.git", tag, tag + "^{}"],
+                  text=True,
+              )
+              refs = dict(line.split()[::-1] for line in output.splitlines())
+              expected = refs.get(tag + "^{}", refs.get(tag))
+              if not expected:
+                  raise SystemExit(f"Cannot resolve release pin: {pin}")
+          actual = manifest["commits"]["vllm"]
+          matches = actual == expected
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"matches={str(matches).lower()}\n")
+          summary = f"{os.environ['PIN_FILE']}: build={actual}, pin={expected}"
+          if not matches:
+              summary += "; UT skipped because this build does not contain that pin"
+              print(f"::notice::{summary}")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as output:
+              output.write(summary + "\n")
+          PYTHON
+
+      - name: Install wheels into the fresh SAIL runtime
+        if: steps.manifest.outputs.matches == 'true'
+        run: |
+          # Keep the runtime image's SDK/PyTorch and their matching dependencies.
+          # Only replace vLLM and the plugin, as in the E2E smoke.
+          python -m pip install --no-deps --force-reinstall "${WHEELS_DIR}"/vllm/*.whl "${WHEELS_DIR}"/vllm-sail/*.whl
+          PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
+            python -m pip install -r requirements/dev.txt
+          unset VLLM_VERSION PYTHONPATH
+          cd /tmp
+          python - <<'PYTHON'
+          import torch
+          import vllm
+          import vllm_sail
+          from vllm_sail.compat import check_vllm_compatibility
+          from vllm.platforms import current_platform
+
+          check_vllm_compatibility(force=True)
+          assert current_platform.is_ppu(), current_platform
+          print("SAIL PyTorch:", torch.__version__, torch.__file__)
+          print("vLLM:", vllm.__file__)
+          print("vLLM SAIL:", vllm_sail.__file__)
+          print("Platform:", type(current_platform).__name__)
+          PYTHON
+
+      - name: Run compatibility UT beside the built vLLM
+        if: steps.manifest.outputs.matches == 'true'
+        run: |
+          unset VLLM_VERSION
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+          mkdir -p "${ARTIFACT_DIR}"
+          python -m pytest tests/ut -q -rs -m "not upstream_source and not ppu" \
+            --junitxml="${ARTIFACT_DIR}/pin-ut.xml" 2>&1 | tee "${ARTIFACT_DIR}/pin-ut.log"
+
+      - name: Upload pin UT diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ppu-pin-${{ matrix.pin-file }}-${{ github.run_id }}
+          path: |
+            ${{ env.ARTIFACT_DIR }}/pin-ut.log
+            ${{ env.ARTIFACT_DIR }}/pin-ut.xml
+            ${{ env.WHEELS_DIR }}/wheel-manifest.json
+          if-no-files-found: warn
+          retention-days: 14
