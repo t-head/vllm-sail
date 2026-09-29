@@ -11,7 +11,8 @@ import pytest
 from tests.support.source import assert_accepts_upstream_keywords, function
 
 
-def test_pla_prefill_preserves_caller_buffers(monkeypatch):
+@pytest.mark.parametrize("num_heads", [12, 24])
+def test_pla_prefill_preserves_caller_buffers(monkeypatch, num_heads):
     calls = []
     pla = ModuleType("pla.prefill.flashkdapro")
     pla.flashkda_fwd = lambda **kw: calls.append(kw)
@@ -19,10 +20,16 @@ def test_pla_prefill_preserves_caller_buffers(monkeypatch):
     monkeypatch.setenv("VLLM_SAIL_USE_PLA", "1")
 
     class Tensor:
-        shape = (1, 5, 12, 128)
+        shape = (1, 5, num_heads, 128)
 
         def view(self, *shape):
             return self
+
+    class Bias:
+        shape = (num_heads * 128,)
+
+        def view(self, *shape):
+            return SimpleNamespace(shape=shape)
 
     namespace = {
         "current_platform": SimpleNamespace(is_ppu=lambda: True),
@@ -31,11 +38,14 @@ def test_pla_prefill_preserves_caller_buffers(monkeypatch):
     fn = function(
         "vllm_sail/patch/enhancement/attention/kda.py", "_flashkda_prefill", namespace
     )
-    tensors = [Tensor() for _ in range(13)]
-    q, k, v, g, beta, a, bias, initial, seq, out, final, workspace, checkpoint = tensors
+    tensors = [Tensor() for _ in range(12)]
+    q, k, v, g, beta, a, initial, seq, out, final, workspace, checkpoint = tensors
+    bias = Bias()
     result = fn(q, k, v, g, beta, a, bias, -5.0, initial, seq, out, final, workspace)
     assert result == (out, final)
     assert calls[0]["out"] is out and calls[0]["final_state"] is final
+    assert calls[0]["dt_bias"].shape == (num_heads, 128)
+    assert bias.shape == (num_heads * 128,)
     with pytest.raises(NotImplementedError, match="checkpoint"):
         fn(
             q,
