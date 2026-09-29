@@ -141,6 +141,10 @@ jobs:
           source /usr/local/PPU_SDK/envsetup.sh
           export PIP_INDEX_URL="${SAIL_PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}"
           unset VLLM_VERSION
+          # The SAIL archive replaces torch/torchvision, but supplies no
+          # torchaudio. Remove the image's CUDA-linked optional package so
+          # Transformers does not load libcudart during CPU UT collection.
+          python -m pip uninstall -y torchaudio
           python scripts/ci/ppu_wheel_manifest.py verify artifacts/wheels
           python -m pip install --no-deps --force-reinstall artifacts/wheels/vllm-sail/*.whl
           python -m pip install -r requirements/dev.txt
