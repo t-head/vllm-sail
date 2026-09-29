@@ -81,7 +81,16 @@ def main() -> None:
             "schema": 1,
             "commits": {
                 name: subprocess.check_output(
-                    ["git", "-C", str(source), "rev-parse", "HEAD"], text=True
+                    [
+                        "git",
+                        "-c",
+                        f"safe.directory={source.resolve()}",
+                        "-C",
+                        str(source),
+                        "rev-parse",
+                        "HEAD",
+                    ],
+                    text=True,
                 ).strip()
                 for name, source in (
                     ("vllm", args.vllm_source),

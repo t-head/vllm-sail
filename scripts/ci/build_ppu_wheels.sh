@@ -194,10 +194,27 @@ PY
     cargo --version | tee "${LOG_DIR}/cargo-version.log"
     python use_existing_torch.py
     python -m pip install -r requirements/build/cuda.txt
-    VLLM_TARGET_DEVICE=empty VLLM_REQUIRE_RUST_FRONTEND=1 \
-        MAX_JOBS="${BUILD_JOBS}" CARGO_BUILD_JOBS="${BUILD_JOBS}" \
-        python -m pip wheel --no-build-isolation --no-deps \
-            --wheel-dir "${VLLM_WHEEL_DIR}" .
+    export VLLM_TARGET_DEVICE=empty VLLM_REQUIRE_RUST_FRONTEND=1
+    export MAX_JOBS="${BUILD_JOBS}" CARGO_BUILD_JOBS="${BUILD_JOBS}"
+    # Compile explicitly: pip hides successful backend output by default, and
+    # a wheel's presence alone does not demonstrate a local Cargo build.
+    python setup.py build_rust --release --inplace \
+        2>&1 | tee "${LOG_DIR}/vllm-rust-build.log"
+    python - <<'PY'
+from pathlib import Path
+
+binary = Path("vllm/vllm-rs")
+extensions = list(Path("vllm").glob("_rust_tool_parser.*.so"))
+if not binary.is_file() or binary.stat().st_size == 0 or len(extensions) != 1:
+    raise SystemExit("required local Rust artifacts were not built")
+for artifact in (binary, *extensions):
+    if artifact.stat().st_size == 0:
+        raise SystemExit(f"empty Rust artifact: {artifact}")
+    print(f"Local Rust artifact: {artifact} ({artifact.stat().st_size} bytes)")
+PY
+    # Upstream setup.py packages these locally built artifacts without rebuilding.
+    python -m pip wheel --verbose --no-build-isolation --no-deps \
+        --wheel-dir "${VLLM_WHEEL_DIR}" .
 ) 2>&1 | tee "${LOG_DIR}/vllm-build.log"
 
 mapfile -t vllm_wheels < <(
@@ -250,6 +267,6 @@ mapfile -t sail_wheels < <(
     printf 'cargo=%s\n' "$(cat "${LOG_DIR}/cargo-version.log")"
     printf 'vllm_commit=%s\n' "$(git -C "${VLLM_SRC}" rev-parse HEAD)"
     printf 'vllm_wheel=%s\n' "$(basename "${vllm_wheels[0]}")"
-    printf 'vllm_sail_commit=%s\n' "$(git -C "${ROOT_DIR}" rev-parse HEAD)"
+    printf 'vllm_sail_commit=%s\n' "$(git -c "safe.directory=${ROOT_DIR}" -C "${ROOT_DIR}" rev-parse HEAD)"
     printf 'vllm_sail_wheel=%s\n' "$(basename "${sail_wheels[0]}")"
 } >>"${MANIFEST}"

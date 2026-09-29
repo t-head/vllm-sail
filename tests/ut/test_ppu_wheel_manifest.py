@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import zipfile
@@ -89,7 +90,8 @@ def test_legacy_artifact_without_manifest_fails_closed(tmp_path: Path) -> None:
         manifest.verify(tmp_path)
 
 
-def test_cli_records_source_commits(tmp_path: Path) -> None:
+@pytest.mark.parametrize("different_owner", [False, True])
+def test_cli_records_source_commits(tmp_path: Path, different_owner: bool) -> None:
     make_wheels(tmp_path)
     result = subprocess.run(
         [
@@ -104,6 +106,10 @@ def test_cli_records_source_commits(tmp_path: Path) -> None:
         ],
         capture_output=True,
         text=True,
+        env={
+            **os.environ,
+            "GIT_TEST_ASSUME_DIFFERENT_OWNER": str(int(different_owner)),
+        },
     )
     assert result.returncode == 0, result.stderr
     data = manifest.verify(tmp_path)

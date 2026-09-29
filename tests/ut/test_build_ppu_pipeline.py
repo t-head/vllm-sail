@@ -93,3 +93,15 @@ def test_build_workflow_uses_script_and_retains_artifacts() -> None:
 def test_build_workflow_uploads_manifest_with_wheels() -> None:
     assert "path: artifacts/wheels/" in WORKFLOW.read_text()
     assert "--depth 1" not in SCRIPT.read_text()
+
+
+def test_rust_build_is_explicit_before_wheel_packaging() -> None:
+    text = SCRIPT.read_text()
+    required = text.index(
+        "export VLLM_TARGET_DEVICE=empty VLLM_REQUIRE_RUST_FRONTEND=1"
+    )
+    rust = text.index("python setup.py build_rust --release --inplace")
+    check = text.index("required local Rust artifacts were not built")
+    wheel = text.index("python -m pip wheel --verbose")
+    assert required < rust < check < wheel
+    assert "vllm-rust-build.log" in text
