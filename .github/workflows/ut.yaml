@@ -77,9 +77,16 @@ jobs:
 
   vllm-pin-compatibility:
     name: vLLM pin (${{ matrix.pin-file }})
-    runs-on: ubuntu-latest
-    # A real vLLM install can be unavailable or unsupported on a public CPU
-    # runner. Keep this compatibility signal visible without blocking CPU UT.
+    # Only repository branches may execute code on the internal runner.
+    # Fork PRs still run the public CPU and source-contract checks above.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: k8s-runner-group-cpu-thead
+    timeout-minutes: 180
+    container:
+      image: reg.docker.alibaba-inc.com/ai-tmp/llm:pytorch2.13.0-ubuntu24.04-cuda13.0-vllm0.27.0-py312-ppu202609111952
+    permissions:
+      contents: read
+    # Preserve the advisory status while exercising the real SAIL stack.
     continue-on-error: true
     strategy:
       fail-fast: false
@@ -87,24 +94,80 @@ jobs:
         pin-file:
           - vllm-release-tag.commit
           - vllm-main-verified.commit
+    env:
+      ARTIFACT_DIR: ${{ github.workspace }}/artifacts
+      VLLM_USE_RUST_FRONTEND: "0"
+      VLLM_USE_RUST_BENCH: "0"
+    defaults:
+      run:
+        shell: bash
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Disable internal GitHub mirror rewrite
+        shell: bash
+        run: |
+          # The self-hosted CPU runner image ships a global/system git
+          # url.<internal-mirror>.insteadOf = https://github.com rewrite. Left in
+          # place it makes actions/checkout fetch from the internal mirror and
+          # fail, so strip only the github.com rewrites before checkout.
+          for scope in system global; do
+            echo "=== ${scope} insteadOf before ==="
+            git config --${scope} --get-regexp '^url\..*\.insteadof$' 2>/dev/null || true
+            while IFS= read -r section; do
+              [ -n "${section}" ] || continue
+              git config --${scope} --unset-all "${section}.insteadOf" 2>/dev/null || true
+            done < <(git config --${scope} --get-regexp '^url\..*\.insteadof$' 2>/dev/null | awk '$2 ~ /github\.com/ {sub(/\.insteadof$/, "", $1); print $1}')
+          done
+          echo "=== insteadOf after (system) ==="
+          git config --system --get-regexp '^url\..*\.insteadof$' 2>/dev/null || echo none
+          echo "=== insteadOf after (global) ==="
+          git config --global --get-regexp '^url\..*\.insteadof$' 2>/dev/null || echo none
+
+      - name: Check out vLLM SAIL
+        uses: actions/checkout@v4
         with:
-          python-version: "3.12"
-          cache: pip
-      - name: Install test tooling
-        run: python -m pip install -r requirements/dev.txt
-      - name: Install the selected vLLM pin
+          github-server-url: https://github.com
+
+      - name: Build the selected pin with SAIL SDK and PyTorch
         env:
           PIN_FILE: ${{ matrix.pin-file }}
         run: |
-          pin="$(tr -d '[:space:]' < ".github/${PIN_FILE}")"
-          if [[ "${PIN_FILE}" == "vllm-release-tag.commit" ]]; then
-            python -m pip install "vllm==${pin#v}"
-          else
-            python -m pip install "vllm @ git+https://github.com/vllm-project/vllm.git@${pin}"
-          fi
-      - name: Run unit tests beside vLLM
-        # Source-only checks run independently above, even if installation fails.
-        run: python -m pytest tests/ut -q -m "not upstream_source"
+          VLLM_REF="$(tr -d '[:space:]' < ".github/${PIN_FILE}")"
+          test -n "${VLLM_REF}"
+          export VLLM_REF
+          bash scripts/ci/build_ppu_wheels.sh
+
+      - name: Install SAIL plugin and run compatibility UT
+        run: |
+          source /usr/local/PPU_SDK/envsetup.sh
+          export PIP_INDEX_URL="${SAIL_PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}"
+          unset VLLM_VERSION
+          python scripts/ci/ppu_wheel_manifest.py verify artifacts/wheels
+          python -m pip install --no-deps --force-reinstall artifacts/wheels/vllm-sail/*.whl
+          python -m pip install -r requirements/dev.txt
+          python - <<'PYTHON'
+          import torch
+          from vllm_sail.compat import check_vllm_compatibility
+          from vllm.platforms import current_platform
+
+          check_vllm_compatibility(force=True)
+          assert current_platform.is_ppu(), current_platform
+          print("SAIL PyTorch:", torch.__version__, torch.__file__)
+          print("Platform:", type(current_platform).__name__)
+          PYTHON
+          # Exercise checkout tests beside the selected real vLLM and SAIL torch.
+          # Device and source-only checks have their own workflows/jobs.
+          python -m pytest tests/ut -q -rs -m "not upstream_source and not ppu" \
+            --junitxml=artifacts/pin-ut.xml 2>&1 | tee artifacts/logs/pin-ut.log
+
+      - name: Upload pin build and UT diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ppu-pin-${{ matrix.pin-file }}-${{ github.run_id }}
+          path: |
+            artifacts/logs/**
+            artifacts/build-manifest.txt
+            artifacts/wheels/wheel-manifest.json
+            artifacts/pin-ut.xml
+          if-no-files-found: warn
+          retention-days: 14
