@@ -29,6 +29,7 @@ from vllm_sail.patch.enhancement.attention import (
     mla_attention,  # noqa: F401
     mla_indexer,  # noqa: F401
     mla_prefill_flash_attn,  # noqa: F401
+    minimax_m3_msa,  # noqa: F401
     sparse_attn_indexer,  # noqa: F401
     triton_decode_attention,  # noqa: F401
 )
