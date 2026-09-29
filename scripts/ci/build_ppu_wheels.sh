@@ -12,7 +12,7 @@ MANIFEST="${ARTIFACT_DIR}/build-manifest.txt"
 SDK_URL="${SDK_URL:-https://art-pub.eng.t-head.cn/artifactory/apackage/daily/ppu.2v2_release/ppu.2v2_release-202609251051/PPU_SDK/ppu_1.0.0_Ubuntu2404_v13_release.run}"
 TORCH_URL="${TORCH_URL:-https://art-pub.eng.t-head.cn/artifactory/apackage/daily/ppu.2v2_release/latest/PPU_SDK_PYPI/pytorch/ppu_sdk_hggcrt3-pytorch2.13.0-ubuntu2404-py312.tar.gz}"
 VLLM_REPOSITORY="${VLLM_REPOSITORY:-https://github.com/vllm-project/vllm.git}"
-VLLM_REF="${VLLM_REF:-$(tr -d '[:space:]' < "${ROOT_DIR}/.github/vllm-release-tag.commit")}"
+VLLM_REF="${VLLM_REF:-$(tr -d '[:space:]' < "${ROOT_DIR}/.github/vllm-main-verified.commit")}"
 PYTORCH_SAIL_ARCH="${PYTORCH_SAIL_ARCH:-ppu_15;ppu_10}"
 # Building the native PPU kernels is memory-heavy (~2 GiB per compile job). The
 # CPU runner exposes many cores but a smaller memory limit, so an unbounded

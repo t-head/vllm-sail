@@ -35,14 +35,8 @@ jobs:
           fail_ci_if_error: false
 
   vllm-source-contracts:
-    name: vLLM source (${{ matrix.pin-file }})
+    name: vLLM source (main-verified)
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        pin-file:
-          - vllm-release-tag.commit
-          - vllm-main-verified.commit
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -51,11 +45,9 @@ jobs:
           cache: pip
       - name: Resolve the selected upstream ref
         id: upstream
-        env:
-          PIN_FILE: ${{ matrix.pin-file }}
         run: |
-          pin="$(tr -d '[:space:]' < ".github/${PIN_FILE}")"
-          test -n "${pin}"
+          pin="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
+          [[ "${pin}" =~ ^[0-9a-f]{40}$ ]]
           echo "ref=${pin}" >> "$GITHUB_OUTPUT"
       - name: Check out upstream source without installing vLLM
         uses: actions/checkout@v4

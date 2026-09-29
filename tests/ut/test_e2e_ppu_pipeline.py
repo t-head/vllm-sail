@@ -135,10 +135,11 @@ def test_smoke_script_fails_when_serve_dies_early() -> None:
 # --- workflow -----------------------------------------------------------------
 
 
-def test_e2e_workflow_is_manual_and_uses_cpu_runner() -> None:
+def test_e2e_workflow_is_reusable_and_manual_and_uses_cpu_runner() -> None:
     text = WORKFLOW.read_text()
     assert "workflow_dispatch:" in text
-    # E2E is expensive and occupies PPU cards; keep it manual only.
+    # PR orchestration calls the same workflow as manual smoke runs.
+    assert "workflow_call:" in text
     assert "pull_request:" not in text
     assert "push:" not in text
     # ppu-scheduler-action itself runs on the CPU runner scale set and dispatches

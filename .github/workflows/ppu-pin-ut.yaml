@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       build_run_id:
-        description: Build PPU wheels run supplying ppu-wheels-<run_id>
+        description: PPU CI build run supplying ppu-wheels-<run_id>
         required: true
         type: string
       image:
@@ -18,17 +18,11 @@ permissions:
 
 jobs:
   pin-unit-tests:
-    name: vLLM pin (${{ matrix.pin-file }})
+    name: main-verified
     runs-on: k8s-runner-group-cpu-thead
     timeout-minutes: 30
     container:
       image: ${{ inputs.image }}
-    strategy:
-      fail-fast: false
-      matrix:
-        pin-file:
-          - vllm-release-tag.commit
-          - vllm-main-verified.commit
     env:
       WHEELS_DIR: /tmp/ppu-wheels
       VLLM_USE_RUST_FRONTEND: "0"
@@ -74,7 +68,7 @@ jobs:
       - name: Verify wheel manifest and pin
         id: manifest
         env:
-          PIN_FILE: ${{ matrix.pin-file }}
+          REQUIRE_PR_ARTIFACT: ${{ github.event_name == 'pull_request' }}
         run: |
           python scripts/ci/ppu_wheel_manifest.py verify "${WHEELS_DIR}"
           python - <<'PYTHON'
@@ -85,25 +79,21 @@ jobs:
           from pathlib import Path
 
           manifest = json.loads((Path(os.environ["WHEELS_DIR"]) / "wheel-manifest.json").read_text())
-          pin = Path(".github", os.environ["PIN_FILE"]).read_text().strip()
-          if re.fullmatch(r"[0-9a-f]{40}", pin):
-              expected = pin
-          else:
-              # Release pins are tags; prefer the peeled commit for annotated tags.
-              tag = f"refs/tags/{pin}"
-              output = subprocess.check_output(
-                  ["git", "ls-remote", "--exit-code", "https://github.com/vllm-project/vllm.git", tag, tag + "^{}"],
-                  text=True,
-              )
-              refs = dict(line.split()[::-1] for line in output.splitlines())
-              expected = refs.get(tag + "^{}", refs.get(tag))
-              if not expected:
-                  raise SystemExit(f"Cannot resolve release pin: {pin}")
+          expected = Path(".github/vllm-main-verified.commit").read_text().strip()
+          if not re.fullmatch(r"[0-9a-f]{40}", expected):
+              raise SystemExit("main-verified must contain an immutable upstream commit SHA")
           actual = manifest["commits"]["vllm"]
           matches = actual == expected
+          if os.environ["REQUIRE_PR_ARTIFACT"] == "true":
+              # PR gating must fail closed; a manual reuse may skip a different pin.
+              subprocess.run(
+                  ["python", "scripts/ci/ppu_wheel_manifest.py", "verify", os.environ["WHEELS_DIR"],
+                   "--vllm-commit", expected, "--sail-commit", os.environ["GITHUB_SHA"]],
+                  check=True,
+              )
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
               output.write(f"matches={str(matches).lower()}\n")
-          summary = f"{os.environ['PIN_FILE']}: build={actual}, pin={expected}"
+          summary = f"main-verified: build={actual}, pin={expected}"
           if not matches:
               summary += "; UT skipped because this build does not contain that pin"
               print(f"::notice::{summary}")
@@ -122,10 +112,10 @@ jobs:
           node_selector: board-type=OAM-810E
           timeout_minutes: 20
           cleanup_policy: always
-          job_suffix: ${{ matrix.pin-file }}
+          job_suffix: pin-main-verified
           source_dir: /workspace/source
           artifact_paths: ${{ env.WHEELS_DIR }}
-          extra_env: WHEELS_DIR=/workspace/source/ppu-wheels,UT_RESULTS_DIR=/mnt/wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/pin-ut-${{ matrix.pin-file }},VLLM_USE_RUST_FRONTEND=0,VLLM_USE_RUST_BENCH=0
+          extra_env: WHEELS_DIR=/workspace/source/ppu-wheels,UT_RESULTS_DIR=/mnt/wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/pin-ut-main-verified,VLLM_USE_RUST_FRONTEND=0,VLLM_USE_RUST_BENCH=0
           container_options: |
             privileged: true
             host_ipc: true
@@ -137,10 +127,10 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ppu-pin-${{ matrix.pin-file }}-${{ github.run_id }}
+          name: ppu-pin-main-verified-${{ github.run_id }}
           path: |
-            /wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/pin-ut-${{ matrix.pin-file }}/*.log
-            /wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/pin-ut-${{ matrix.pin-file }}/pin-ut.xml
+            /wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/pin-ut-main-verified/*.log
+            /wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/pin-ut-main-verified/pin-ut.xml
             ${{ env.WHEELS_DIR }}/wheel-manifest.json
           if-no-files-found: warn
           retention-days: 14

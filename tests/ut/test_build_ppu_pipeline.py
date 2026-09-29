@@ -24,7 +24,7 @@ def test_build_script_preserves_required_build_contract() -> None:
         "set -Eeuo pipefail",
         "ppu_1.0.0_Ubuntu2404_v13_release.run",
         "ppu_sdk_hggcrt3-pytorch2.13.0-ubuntu2404-py312.tar.gz",
-        ".github/vllm-release-tag.commit",
+        ".github/vllm-main-verified.commit",
         "unset TORCH_CUDA_ARCH_LIST",
         "command -v hgcc",
         "command -v nvcc",
@@ -67,10 +67,10 @@ def test_build_script_caps_parallelism_to_avoid_oom() -> None:
     assert 'BUILD_JOBS="${BUILD_JOBS:-' in text
 
 
-def test_build_workflow_is_manual_and_uses_cpu_runner() -> None:
+def test_build_workflow_supports_prs_and_manual_runs_on_cpu_runner() -> None:
     text = WORKFLOW.read_text()
     assert "workflow_dispatch:" in text
-    assert "pull_request:" not in text
+    assert "pull_request:" in text
     assert "push:" not in text
     # ppu-scheduler-action does not support compiling on PPU resources; t-head
     # build jobs must run on the CPU runner scale set. The pod is sized with

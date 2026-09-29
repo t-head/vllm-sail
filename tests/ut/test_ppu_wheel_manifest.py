@@ -90,6 +90,40 @@ def test_legacy_artifact_without_manifest_fails_closed(tmp_path: Path) -> None:
         manifest.verify(tmp_path)
 
 
+@pytest.mark.parametrize("stale_package", [None, "vllm", "vllm-sail", "missing"])
+def test_cli_requires_the_pr_and_upstream_commits(
+    tmp_path: Path, stale_package: str | None
+) -> None:
+    make_wheels(tmp_path)
+    data = record(tmp_path)
+    commits = {"vllm": "a" * 40, "vllm-sail": "b" * 40}
+    data["commits"] = commits.copy()
+    if stale_package == "missing":
+        del data["commits"]
+    elif stale_package:
+        data["commits"][stale_package] = "c" * 40
+    (tmp_path / manifest.MANIFEST).write_text(json.dumps(data))
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "verify",
+            str(tmp_path),
+            "--vllm-commit",
+            commits["vllm"],
+            "--sail-commit",
+            commits["vllm-sail"],
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if stale_package:
+        assert result.returncode != 0
+        assert "source commit differs" in result.stderr
+    else:
+        assert result.returncode == 0, result.stderr
+
+
 @pytest.mark.parametrize("different_owner", [False, True])
 def test_cli_records_source_commits(tmp_path: Path, different_owner: bool) -> None:
     make_wheels(tmp_path)

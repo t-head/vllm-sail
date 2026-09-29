@@ -54,7 +54,12 @@ def wheel_records(directory: Path) -> dict:
     return records
 
 
-def verify(directory: Path) -> dict:
+def verify(
+    directory: Path,
+    *,
+    vllm_commit: str | None = None,
+    sail_commit: str | None = None,
+) -> dict:
     manifest = json.loads((directory / MANIFEST).read_text())
     if manifest.get("schema") != 1:
         raise ValueError("unsupported wheel manifest schema")
@@ -62,6 +67,11 @@ def verify(directory: Path) -> dict:
         raise ValueError(
             "wheel filenames, versions or hashes differ from build manifest"
         )
+    for name, expected in (("vllm", vllm_commit), ("vllm-sail", sail_commit)):
+        if expected is not None and manifest.get("commits", {}).get(name) != expected:
+            raise ValueError(
+                f"{name} source commit differs from required revision {expected}"
+            )
     return manifest
 
 
@@ -71,9 +81,13 @@ def main() -> None:
     parser.add_argument("directory", type=Path)
     parser.add_argument("--vllm-source", type=Path)
     parser.add_argument("--sail-source", type=Path)
+    parser.add_argument("--vllm-commit", help="require this upstream source commit")
+    parser.add_argument("--sail-commit", help="require this plugin source commit")
     args = parser.parse_args()
     if args.command == "verify":
-        manifest = verify(args.directory)
+        manifest = verify(
+            args.directory, vllm_commit=args.vllm_commit, sail_commit=args.sail_commit
+        )
     else:
         if args.vllm_source is None or args.sail_source is None:
             parser.error("create requires --vllm-source and --sail-source")
