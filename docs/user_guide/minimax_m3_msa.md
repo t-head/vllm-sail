@@ -19,6 +19,13 @@ The adapter requires paged NHD/HND detection, HKT score output, and top-k
 selection with `num_valid_pages` and an `output` buffer. Missing or incompatible
 APIs fail explicitly on selection.
 
+PPU MSA natively supports top-k block indices in both
+`[tokens, index_heads, topk]` and `[index_heads, tokens, topk]` layouts. This
+adapter keeps vLLM's token-major shared buffer throughout: selection writes
+directly into its chunk slices, and attention consumes token-major indices.
+No top-k layout conversion is needed. Block-id sorting and invalid-entry
+masking preserve this layout.
+
 Check where the process imports both packages:
 
 ```bash
@@ -84,6 +91,8 @@ Report accuracy and model execution separately from operator test results.
 
 `VLLM_SAIL_MINIMAX_M3_MSA_INDEXER_MEM_BUDGET_MB` defaults to `256` and bounds the
 live score tensor plus the library's equally sized top-k transpose workspace.
+That workspace rearranges dense scores for selection; it is separate from the
+top-k block-index layouts described above.
 It does not bound all MSA planning, output, allocator, or KV-cache memory.
 Requests longer than a chunk are split while retaining their causal offsets.
 All three variables accept corresponding `VLLM_PPU_*` aliases; SAIL names win.

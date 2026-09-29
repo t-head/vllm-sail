@@ -247,7 +247,7 @@ def force_local_scores(scores, pages, init_blocks: int, local_blocks: int) -> No
 
 
 def sorted_blocks(topk, pages):
-    """Ascending logical block ids; invalid entries (-1) always trail."""
+    """Sort logical block ids with invalid entries last; retain token-major layout."""
     import torch
 
     invalid = (topk < 0) | (topk >= pages[:, None, None])
@@ -271,7 +271,10 @@ def run_chunks(
 ):
     """Run OnlyScore/top-k or sparse attend, consuming each eager plan immediately.
 
-    ``topk`` is always the model's token-major shared output buffer. No plans or
+    PPU MSA accepts both [tokens, index_heads, topk] and
+    [index_heads, tokens, topk]. Keep the model's token-major shared buffer:
+    top-k selection writes into its slices and sparse attend consumes that same
+    layout after block-id sorting, without a layout conversion. No plans or
     score tensors accumulate across chunks or layers. Main and index callers
     supply their own physical block tables.
     """
