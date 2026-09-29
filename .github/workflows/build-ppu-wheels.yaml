@@ -11,7 +11,7 @@ on:
       sdk_url:
         description: SAIL SDK installer URL
         required: true
-        default: https://art-pub.eng.t-head.cn/artifactory/apackage/daily/ppu.2v2_release/latest/PPU_SDK/ppu_1.0.0_Ubuntu2404_v13_release.run
+        default: https://art-pub.eng.t-head.cn/artifactory/apackage/daily/ppu.2v2_release/ppu.2v2_release-202609251051/PPU_SDK/ppu_1.0.0_Ubuntu2404_v13_release.run
         type: string
       torch_url:
         description: SAIL PyTorch archive URL

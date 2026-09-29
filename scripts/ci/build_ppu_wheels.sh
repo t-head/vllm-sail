@@ -9,7 +9,7 @@ SAIL_WHEEL_DIR="${ARTIFACT_DIR}/wheels/vllm-sail"
 LOG_DIR="${ARTIFACT_DIR}/logs"
 MANIFEST="${ARTIFACT_DIR}/build-manifest.txt"
 
-SDK_URL="${SDK_URL:-https://art-pub.eng.t-head.cn/artifactory/apackage/daily/ppu.2v2_release/latest/PPU_SDK/ppu_1.0.0_Ubuntu2404_v13_release.run}"
+SDK_URL="${SDK_URL:-https://art-pub.eng.t-head.cn/artifactory/apackage/daily/ppu.2v2_release/ppu.2v2_release-202609251051/PPU_SDK/ppu_1.0.0_Ubuntu2404_v13_release.run}"
 TORCH_URL="${TORCH_URL:-https://art-pub.eng.t-head.cn/artifactory/apackage/daily/ppu.2v2_release/latest/PPU_SDK_PYPI/pytorch/ppu_sdk_hggcrt3-pytorch2.13.0-ubuntu2404-py312.tar.gz}"
 VLLM_REPOSITORY="${VLLM_REPOSITORY:-https://github.com/vllm-project/vllm.git}"
 VLLM_REF="${VLLM_REF:-$(tr -d '[:space:]' < "${ROOT_DIR}/.github/vllm-release-tag.commit")}"
