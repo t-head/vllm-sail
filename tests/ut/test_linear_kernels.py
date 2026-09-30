@@ -14,8 +14,11 @@ import subprocess
 import sys
 import textwrap
 from importlib.metadata import PackageNotFoundError, distribution
+from types import SimpleNamespace
 
 import pytest
+
+from tests.support.source import function
 
 _KERNEL_CLASSES = [
     "PPUInt8ScaledMMLinearKernel",
@@ -36,6 +39,41 @@ _EXPECTED_FIRST = {
         "PPUCutlassFp8BlockScaledMMKernel",
     ],
 }
+
+
+@pytest.mark.parametrize(
+    "shape,bf16,backend,available,expected",
+    [
+        ((5120, 576), True, "", True, True),
+        ((128, 256), True, "deepgemm", True, True),
+        ((96, 576), True, "", True, False),
+        ((5120, 576), False, "", True, False),
+        ((5120, 576), True, "cutlass", True, False),
+        ((5120, 576), True, "", False, False),
+    ],
+)
+def test_channelwise_deepgemm_pads_k_and_preserves_other_gates(
+    shape, bf16, backend, available, expected
+):
+    torch = SimpleNamespace(bfloat16=object())
+    predicate = function(
+        "vllm_sail/utils/deep_gemm.py",
+        "should_use_deepgemm_for_fp8_linear",
+        {
+            "torch": torch,
+            "ppu_envs": SimpleNamespace(VLLM_SAIL_DENSE_BACKEND=backend),
+            "is_deep_gemm_supported": lambda: available,
+        },
+    )
+    can_implement = function(
+        "vllm_sail/model_executor/kernels/linear/scaled_mm/ppu.py",
+        "PPUDeepGemmFP8ScaledMMLinearKernel.can_implement",
+        {"torch": torch, "should_use_deepgemm_for_fp8_linear": predicate},
+    )
+    config = SimpleNamespace(
+        out_dtype=torch.bfloat16 if bf16 else object(), weight_shape=shape
+    )
+    assert can_implement(None, config)[0] is expected
 
 
 @pytest.fixture(scope="module")

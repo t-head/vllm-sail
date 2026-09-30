@@ -36,6 +36,7 @@ _REGISTRY_BY_KERNEL_TYPE = {
     "int8": "_POSSIBLE_INT8_KERNELS",
     "fp8": "_POSSIBLE_FP8_KERNELS",
     "fp8_block": "_POSSIBLE_FP8_BLOCK_KERNELS",
+    "mxfp8": "_POSSIBLE_MXFP8_KERNELS",
 }
 
 _registered = False
@@ -87,6 +88,9 @@ def _selection_plan() -> list[tuple[str, list[type]]]:
     ``kernels/linear/__init__.py``. Imported lazily because these modules pull in
     torch and the PPU SDK.
     """
+    from vllm_sail.model_executor.kernels.linear.mxfp8 import (
+        PPUEmulationMxfp8LinearKernel,
+    )
     from vllm_sail.model_executor.kernels.linear.scaled_mm.ppu import (
         PPUCutlassFp8BlockScaledMMKernel,
         PPUCutlassFP8ScaledMMLinearKernel,
@@ -96,6 +100,7 @@ def _selection_plan() -> list[tuple[str, list[type]]]:
     )
 
     return [
+        ("mxfp8", [PPUEmulationMxfp8LinearKernel]),
         ("int8", [PPUInt8ScaledMMLinearKernel]),
         (
             "fp8",
@@ -127,6 +132,16 @@ def register() -> None:
         # Reversed so the first entry in each list ends up first overall.
         for kernel_class in reversed(kernel_classes):
             _register_first(kernel_class, kernel_type)
+
+    # Upstream backend filtering compares class identity. Keep explicit
+    # --linear-backend emulation usable with the PPU-only subclass too.
+    from vllm.model_executor.kernels import linear as linear_kernels
+
+    for kernel_type, kernel_classes in plan:
+        if kernel_type == "mxfp8":
+            linear_kernels._LINEAR_BACKEND_KERNEL_MAP["emulation"].update(
+                kernel_classes
+            )
 
     _registered = True
     init_logger(__name__).debug(
