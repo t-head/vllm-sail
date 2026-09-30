@@ -104,6 +104,9 @@ pytest tests/e2e/test_mxfp4_prepare.py -q -rs
 pytest tests/e2e/tier_b/test_norm_quant.py -q -rs
 ```
 
+For the opt-in MiniMax M3 SAIL MSA path, follow the
+[MSA verification procedure](minimax_m3_msa.md).
+
 The [`tests/e2e`](../../tests/e2e) directory also contains linear-attention,
 indexer, cache and model-specific kernel tests. Select the relevant tests for
 the change; run the full suite when qualifying an environment:
