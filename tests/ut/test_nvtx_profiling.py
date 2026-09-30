@@ -19,6 +19,7 @@ import importlib.util
 import logging
 import sys
 import types
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -27,17 +28,6 @@ import pytest
 from vllm_sail.patch.utils import PATCH_MARKER, PATCH_REGISTRY, original_of
 
 GATE_VARS = ("VLLM_SAIL_NVTX_PROFILE", "VLLM_PPU_NVTX_PROFILE", "SAIL_NVTX_PROFILE")
-
-# PPU hosts ship nvtx/model_prof; the absence paths below are only
-# exercisable on bare runners, so skip them where the deps exist.
-_PROF_DEPS_PRESENT = (
-    importlib.util.find_spec("nvtx") is not None
-    or importlib.util.find_spec("model_prof") is not None
-)
-skip_with_prof_deps = pytest.mark.skipif(
-    _PROF_DEPS_PRESENT,
-    reason="nvtx/model_prof installed; absence paths need a bare runner",
-)
 
 PROFILING_TARGETS = (
     "vllm.model_executor.layers.linear.ReplicatedLinear.forward",
@@ -335,14 +325,13 @@ def test_sail_false_prevents_install_with_truthy_legacy_aliases(
     assert profiling_pkg._installed is False
 
 
-@skip_with_prof_deps
 def test_missing_nvtx_package_disables_with_warning(
     profiling_pkg,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     monkeypatch.setenv("VLLM_PPU_NVTX_PROFILE", "1")
-    monkeypatch.delitem(sys.modules, "nvtx", raising=False)
+    monkeypatch.setitem(sys.modules, "nvtx", None)
     with caplog.at_level(logging.WARNING):
         profiling_pkg.install()
     assert profiling_pkg._installed is False
@@ -357,11 +346,13 @@ def test_missing_model_prof_still_installs(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     monkeypatch.setenv("VLLM_PPU_NVTX_PROFILE", "1")
+    monkeypatch.setitem(sys.modules, "model_prof", None)
     with caplog.at_level(logging.INFO):
         profiling_pkg.install()
-    # model_prof is absent from this environment by construction.
     assert profiling_pkg._installed is True
-    assert any("model_prof" in record.getMessage() for record in caplog.records)
+    assert any(
+        "without `model_prof`" in record.getMessage() for record in caplog.records
+    )
 
 
 def test_drifted_target_degrades_to_warning(
@@ -500,18 +491,32 @@ def test_scheduler_schedule_is_annotated_and_update_marks(installed) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def bare_nvtx_helpers(fake_vllm: SimpleNamespace, monkeypatch: pytest.MonkeyPatch):
+@pytest.fixture(params=[False, True], ids=["bare", "installed-profiler"])
+def bare_nvtx_helpers(
+    fake_vllm: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    request: pytest.FixtureRequest,
+):
     """Import profiling/nvtx.py fresh with nvtx/model_prof genuinely absent."""
-    monkeypatch.delitem(sys.modules, "nvtx", raising=False)
-    monkeypatch.delitem(sys.modules, "model_prof", raising=False)
+    if request.param:
+        # Deleting sys.modules is insufficient: installed packages can be
+        # imported again from disk. Reproduce an identity NVTX decorator.
+        (tmp_path / "nvtx.py").write_text(
+            "def annotate(name):\n    return lambda func: func\n"
+            "def mark(message):\n    pass\n"
+        )
+        (tmp_path / "model_prof.py").write_text("def prof_iter(i):\n    pass\n")
+        monkeypatch.syspath_prepend(str(tmp_path))
+    # None blocks import even if the SDK/PyPI package is installed on disk.
+    monkeypatch.setitem(sys.modules, "nvtx", None)
+    monkeypatch.setitem(sys.modules, "model_prof", None)
     monkeypatch.delitem(sys.modules, "vllm_sail.profiling.nvtx", raising=False)
     module = importlib.import_module("vllm_sail.profiling.nvtx")
     yield module
     monkeypatch.delitem(sys.modules, "vllm_sail.profiling.nvtx", raising=False)
 
 
-@skip_with_prof_deps
 def test_helpers_import_cleanly_without_optional_deps(bare_nvtx_helpers) -> None:
     assert bare_nvtx_helpers.has_nvtx is False
     assert bare_nvtx_helpers.has_model_prof is False

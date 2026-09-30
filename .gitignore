@@ -8,6 +8,7 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+/artifacts/
 vllm_sail/_version.py
 
 # Local environments and tool caches
