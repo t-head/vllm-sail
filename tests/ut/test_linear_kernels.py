@@ -52,7 +52,7 @@ _EXPECTED_FIRST = {
         ((5120, 576), True, "", False, False),
     ],
 )
-def test_channelwise_deepgemm_pads_k_and_preserves_other_gates(
+def test_channelwise_deepgemm_preserves_k_and_other_gates(
     shape, bf16, backend, available, expected
 ):
     torch = SimpleNamespace(bfloat16=object())
@@ -74,6 +74,23 @@ def test_channelwise_deepgemm_pads_k_and_preserves_other_gates(
         out_dtype=torch.bfloat16 if bf16 else object(), weight_shape=shape
     )
     assert can_implement(None, config)[0] is expected
+
+
+@pytest.mark.parametrize(
+    "k,channelwise,blockwise", [(576, True, False), (640, True, True)]
+)
+def test_fp8_scale_granularity_controls_k_alignment(k, channelwise, blockwise):
+    torch = SimpleNamespace(bfloat16=object())
+    predicate = function(
+        "vllm_sail/utils/deep_gemm.py",
+        "should_use_deepgemm_for_fp8_linear",
+        {
+            "torch": torch,
+            "ppu_envs": SimpleNamespace(VLLM_SAIL_DENSE_BACKEND=""),
+        },
+    )
+    assert predicate(torch.bfloat16, (128, k), True, block_quant=False) is channelwise
+    assert predicate(torch.bfloat16, (128, k), True) is blockwise
 
 
 @pytest.fixture(scope="module")

@@ -59,7 +59,7 @@ def test_channelwise_dense_loading_and_per_token_activation(monkeypatch, input_s
             scheme.process_weights_after_loading(layer)
             assert isinstance(scheme.fp8_linear, PPUDeepGemmFP8ScaledMMLinearKernel)
             assert layer.weight.dtype == torch.float8_e4m3fn
-            assert layer.weight.shape == (128, (input_size + 127) // 128 * 128)
+            assert layer.weight.shape == (128, input_size)
             x = torch.tensor([0.5, -1.0, 2.0], dtype=torch.bfloat16)
             x = x[:, None].expand(3, input_size).contiguous()
             actual = scheme.apply_weights(layer, x)

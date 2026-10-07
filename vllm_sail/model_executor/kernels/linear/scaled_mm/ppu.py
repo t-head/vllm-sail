@@ -377,11 +377,9 @@ class PPUDeepGemmFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     def can_implement(cls, config: FP8ScaledMMLinearLayerConfig):
         if config.out_dtype != torch.bfloat16:
             return False, "Supports only output dtype of bfloat16"
-        # Channel/tensor scales are unchanged by zero-padding K. For example,
-        # DeepSeek V4.1's TP4 shared-expert down projection has K=576.
-        n, k = config.weight_shape
-        padded_shape = (n, (k + 127) // 128 * 128)
-        if not should_use_deepgemm_for_fp8_linear(config.out_dtype, padded_shape):
+        if not should_use_deepgemm_for_fp8_linear(
+            config.out_dtype, config.weight_shape, block_quant=False
+        ):
             return False, "The provided metadata is not supported."
         return True, None
 
@@ -389,11 +387,6 @@ class PPUDeepGemmFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         # Base class stores weight as [K, N] (col-major).
         # fp8_gemm_nt channelwise requires row-major [N, K], transpose here.
         w = layer.weight.data.t().contiguous()
-        padded_k = (w.shape[1] + 127) // 128 * 128
-        if padded_k != w.shape[1]:
-            padded = w.new_zeros((w.shape[0], padded_k))
-            padded[:, : w.shape[1]] = w
-            w = padded
         replace_parameter(
             layer,
             "weight",
@@ -414,12 +407,6 @@ class PPUDeepGemmFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         # B is [N, K] (row-major after process_weights_after_loading).
         # output_shape[-1] from base class is w.shape[1] which was K before
         # transpose, now correct N = B.shape[0].
-        if A.shape[1] != B.shape[1]:
-            # Quantize the original token before padding, retaining its scale.
-            # The extra products are exactly zero; weights stay resident FP8.
-            padded = A.new_zeros((A.shape[0], B.shape[1]))
-            padded[:, : A.shape[1]] = A
-            A = padded
         M = A.shape[0]
         N = B.shape[0]
         output = torch.empty((M, N), dtype=out_dtype, device=A.device)
