@@ -904,6 +904,8 @@ def should_use_deepgemm_for_fp8_linear(
     output_dtype: torch.dtype,
     weight_shape: tuple[int, int],
     supports_deep_gemm: bool | None = None,
+    *,
+    block_quant: bool = True,
 ):
     if (
         ppu_envs.VLLM_SAIL_DENSE_BACKEND
@@ -914,7 +916,8 @@ def should_use_deepgemm_for_fp8_linear(
     if supports_deep_gemm is None:
         supports_deep_gemm = is_deep_gemm_supported()
 
-    # Verify DeepGEMM N/K dims requirements
+    # Channel/tensor scales do not partition K. Only blockwise FP8 requires
+    # its 128-element K blocks; keep that constraint for existing callers.
     # NOTE: Also synchronized with test_w8a8_block_fp8_deep_gemm_matmul
     # test inside kernels/quantization/test_block_fp8.py
     N_MULTIPLE = 64
@@ -924,7 +927,7 @@ def should_use_deepgemm_for_fp8_linear(
         supports_deep_gemm
         and output_dtype == torch.bfloat16
         and weight_shape[0] % N_MULTIPLE == 0
-        and weight_shape[1] % K_MULTIPLE == 0
+        and (not block_quant or weight_shape[1] % K_MULTIPLE == 0)
     )
 
 

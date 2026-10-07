@@ -39,6 +39,7 @@ need workload-specific tuning.
 | BF16 / FP16 | Dense, attention and unquantized MoE paths | Individual backends may accept only a subset; BF16 dense DeepGEMM is opt-in on PPU 1.5 |
 | INT8 | Quantized dense and MoE compute | Scaling mode and weight layout must match the selected backend |
 | FP8 | Dense, MoE and selected cache paths | Device-specific representation and scaling requirements; not every attention path accepts FP8 |
+| MXFP8 | Dense weight dequantization to BF16 using upstream emulation | FP8 E4M3 values with E8M0 scales for each 32 elements along K; execution uses BF16/FP16 linear operations |
 | MXFP4 | PPU DeepGEMM dense and MoE paths | Requires the matching library and checkpoint layout |
 | INT4 W4A16 | Selected mixed-precision MoE paths | The compressed-tensors path accepts symmetric group-size-32 weights without zero points, expert bias or activation ordering |
 
@@ -46,12 +47,39 @@ Checkpoint format support is specific to the implementation. Weight repacking
 alone does not establish execution support. Native Marlin execution remains
 unavailable; do not infer general GPTQ or AWQ coverage from packing utilities.
 
+### MXFP8 dense emulation
+
+PPU selects `PPUEmulationMxfp8LinearKernel` before CUDA-only MXFP8 kernels.
+It inherits upstream's loading and execution methods and is also available
+through `--linear-backend emulation`. Non-PPU devices retain upstream selection.
+This path applies to MXFP8 dense layers independently of model architecture;
+MoE backend selection is separate.
+
+For a weight of shape `[N, K]`, K must be divisible by 32. Runtime scales have
+shape `[N, K / 32]`. ModelOpt expands checkpoint row-block scales, such as
+`[32, 32]`, to one scale row per weight row while preserving the E8M0 bytes.
+The emulation path does not impose FP8 blockwise K128 constraints or pad K.
+
+Upstream's `VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD=1` is the default. It replaces
+the FP8 weight with BF16 once after loading; subsequent linear calls use that
+weight directly, cast to the activation dtype when needed. Dense-weight storage
+doubles compared with the one-byte FP8 values, and the scale tensor is retained.
+With `VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD=0`, the weight remains FP8 and each
+linear call dequantizes it to a temporary BF16 tensor. Both settings use the
+original E8M0 scale (`2 ** (scale_byte - 127)`) and execute the emulation path.
+
+On a prepared PPU environment, verify both settings with
+`python -m pytest tests/e2e/test_mxfp8_emulation.py -q`. These numerical tests
+cover checkpoint scale expansion and K64/K576 output correctness; CPU/source
+tests do not establish device correctness or full-model support.
+
 ## Model integration
 
 | Model family or path | PPU integration |
 | --- | --- |
 | Dense and MoE models | Upstream vLLM architectures using the applicable PPU operators and backends |
 | DeepSeek V4 | Model, MTP and DSpark registrations, with PPU attention, routing and cache paths |
+| DeepSeek V4.1 | Upstream CUDA target and DSpark models with PPU FlashMLA, delayed mHC and mixed-precision checkpoint overrides; see the format constraints below |
 | MiniMax M3 | Optional model registrations, quantization mapping and native attention-related operations |
 | Qwen hybrid models | GDN attention and selected quantization and speculative-decoding adaptations |
 | Kimi K3 | KDA attention and native MLA/cache operations |
@@ -61,6 +89,58 @@ Model registration and kernel availability are separate checks. Record the exact
 checkpoint revision, quantization, context length, parallelism and SDK when
 reporting a successful model run. Newly compiled model-specific operations need
 numerical and model-level validation on each target device.
+
+### DeepSeek V4.1 checkpoint formats
+
+The PPU path reuses upstream V4.1 model execution, shared KV metadata and DSpark
+loading. Select `--moe-backend ppu_deep_gemm` and set `VLLM_USE_DEEP_GEMM=1` for
+MXFP4 routed experts. Dense precision follows the checkpoint:
+
+| Checkpoint | Dense layers | Engram embedding |
+| --- | --- | --- |
+| FP8 with `weight_block_size: [32, 32]` and `expert_dtype: fp4` | Upstream MXFP8 loading and BF16 emulation; this increases resident dense-weight memory by default | Upstream FP8 values with E8M0 block scales |
+| MXFP4 with an explicit `fp8_channelwise_layers` list | Listed layers use PPU FP8 kernels with FP32 per-output-channel weight scales and dynamic per-token activation scales; ignored and unlisted dense layers stay unquantized | A listed `engram.embed` uses FP8 values and one FP32 scale per row |
+
+Original block32 dense weights enter upstream's MXFP8 ModelOpt path when
+`weight_block_size` is `[32, 32]` and the resolved expert dtype selects E8M0
+scales. Loading expands checkpoint scales to per-row `[1, 32]` scales without
+changing their encoded bytes. PPU dense selection chooses the generic
+[MXFP8 emulation](#mxfp8-dense-emulation) path. For grouped `wo_a`, upstream's
+BMM selector also falls back to emulation because its native MXFP8 DeepGEMM
+kernel requires Blackwell.
+
+The PPU output projection honors both upstream dequantization settings. It
+reuses the BF16 weight produced during loading by default; if load-time
+dequantization is disabled, it dequantizes the still-FP8 weight locally in each
+forward. It then uses upstream inverse RoPE and grouped BF16 BMM. The model
+retains the MXFP8 scale granularity and does not reinterpret it as block128.
+
+Per-channel FP8 dense layers do not use the blockwise K128 condition and keep
+their original K, including the TP4 shared-expert K576 shape. Blockwise FP8
+retains its own K128 requirement; neither path adds padding along K.
+DeepGEMM availability, BF16 output and N64 alignment gates still apply.
+
+The mixed-format override accepts `expert_dtype: mxfp4` and normalizes the
+resolved target and draft configs to upstream's `fp4` spelling. It does not
+rewrite checkpoint files or requantize weights. Per-layer precision lists must
+include all shards of a fused projection; partial matches are rejected.
+
+For host-resident Engram tables use `--engram-config '{"cpu_offload":true}'`.
+Channelwise Engram supports the upstream sharding, UVA lookup and prefetch path;
+its `dp_shared_memory` mode is not implemented. DSpark adaptive verification
+requires full CUDA graphs in upstream vLLM, so disable adaptive verification
+when isolating failures with `--enforce-eager`.
+
+If multimodal encoder profiling crashes in the CPU MKL cosine path
+(`vmsCos` / `libmkl_gnu_thread`), retry with `OMP_NUM_THREADS=1` and
+`MKL_NUM_THREADS=1` set before starting vLLM. This is a process-level workaround
+for the affected SAIL PyTorch environment, not a change to the vision model.
+Verify both encoder profiling and an actual image request; passing a standalone
+CPU cosine test does not establish that the worker startup path is safe.
+
+These format adaptations do not establish checkpoint accuracy or full-model
+qualification. Requantizing block-scaled FP8 into per-channel FP8 is lossy;
+validate generated outputs and task accuracy for the exported checkpoint.
 
 ## Selecting a backend
 

@@ -378,7 +378,7 @@ class PPUDeepGemmFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         if config.out_dtype != torch.bfloat16:
             return False, "Supports only output dtype of bfloat16"
         if not should_use_deepgemm_for_fp8_linear(
-            config.out_dtype, config.weight_shape
+            config.out_dtype, config.weight_shape, block_quant=False
         ):
             return False, "The provided metadata is not supported."
         return True, None
@@ -386,11 +386,11 @@ class PPUDeepGemmFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Base class stores weight as [K, N] (col-major).
         # fp8_gemm_nt channelwise requires row-major [N, K], transpose here.
-        w = layer.weight
+        w = layer.weight.data.t().contiguous()
         replace_parameter(
             layer,
             "weight",
-            torch.nn.Parameter(w.data.t().contiguous(), requires_grad=False),
+            torch.nn.Parameter(w, requires_grad=False),
         )
 
     def apply_scaled_mm(
