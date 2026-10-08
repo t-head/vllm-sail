@@ -54,7 +54,7 @@ release from source. For a source build, first prepare vLLM's build and runtime
 dependencies using the SDK's package constraints. Then run from the vLLM checkout:
 
 ```bash
-python use_existing_torch.py
+python tools/use_existing_torch.py
 VLLM_TARGET_DEVICE=empty python -m pip install --no-build-isolation --no-deps .
 ```
 
