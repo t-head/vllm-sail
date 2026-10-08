@@ -39,7 +39,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
       "                     int block_size, Tensor! sorted_token_ids,"
       "                     Tensor! experts_ids,"
       "                     Tensor! num_tokens_post_pad,"
-      "                     Tensor? maybe_expert_map) -> ()");
+      "                     Tensor? maybe_expert_map,"
+      "                     Tensor(a!)? scatter_idx=None) -> ()");
 
   // Aligning the number of tokens to be processed by each expert such
   // that it is divisible by the block size, but for the batched case.

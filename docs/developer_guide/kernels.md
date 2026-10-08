@@ -34,7 +34,7 @@ the compiled set also requires device validation.
 
 ## Regenerate upstream kernels
 
-Use a vLLM checkout at the manifest's `upstream_ref` (currently `v0.30.0`) and
+Use a vLLM checkout at the manifest's `upstream_ref` (currently `v0.31.0`) and
 make sailify available.
 
 ```bash
