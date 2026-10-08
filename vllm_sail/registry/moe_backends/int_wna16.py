@@ -17,7 +17,7 @@ from vllm_sail.registry.moe_backends._extend import extend_enum
 _MODULE = "vllm.model_executor.layers.fused_moe.oracle.int_wna16"
 _META = dict(
     reason="The WNA16 oracle needs the plugin's PPU DeepGEMM experts and packed weight layout.",
-    affected_versions=">=0.30.0,<0.31.0",
+    affected_versions=">=0.31.0,<0.32.0",
     remove_when="The MoE oracle supports registering plugin WNA16 backends.",
 )
 WNA16MoEBackend = oracle.WNA16MoEBackend
@@ -76,6 +76,12 @@ def backend_to_kernel_cls(
         )
 
         return [CPUExpertsInt4]
+    elif backend == WNA16MoEBackend.ZEN_CPU:
+        from vllm.model_executor.layers.fused_moe.experts.zentorch_moe import (
+            ZentorchExpertsInt4,
+        )
+
+        return [ZentorchExpertsInt4]
     elif backend == WNA16MoEBackend.EMULATION:
         from vllm.model_executor.layers.fused_moe.experts.int4_emulation_moe import (
             Int4EmulationTritonExperts,
@@ -92,11 +98,9 @@ backend_to_kernel_cls = patch(_MODULE, "backend_to_kernel_cls", **_META)(
 
 
 def _get_priority_backends() -> list[WNA16MoEBackend]:
-    """
-    Get available backends in priority order based on platform and config.
-    """
+    """Get available backends in priority order based on platform and config."""
     if current_platform.is_cpu():
-        return [WNA16MoEBackend.CPU]
+        return [WNA16MoEBackend.ZEN_CPU, WNA16MoEBackend.CPU]
     if current_platform.is_xpu():
         return [WNA16MoEBackend.XPU]
     # PPU MODIFICATION: begin
@@ -298,6 +302,9 @@ def make_wna16_moe_kernel(
     from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
         XPUExpertsWNA16,
     )
+    from vllm.model_executor.layers.fused_moe.experts.zentorch_moe import (
+        ZentorchExpertsInt4,
+    )
 
     # PPU MODIFICATION: begin
     from vllm_sail.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
@@ -310,8 +317,9 @@ def make_wna16_moe_kernel(
     # PPU MODIFICATION: end
 
     # Currently, we only support TrtLlmMxint4ExpertsMonolithic, MarlinExperts,
-    # BatchedMarlinExperts, XPUExpertsWNA16, CPUExpertsInt4, the Humming
-    # grouped/indexed experts, and Int4EmulationTritonExperts
+    # BatchedMarlinExperts, XPUExpertsWNA16, CPUExpertsInt4,
+    # ZentorchExpertsInt4, the Humming grouped/indexed experts, and
+    # Int4EmulationTritonExperts
     allowed_experts: tuple[type[mk.FusedMoEExperts], ...] = (
         MarlinExperts,
         BatchedMarlinExperts,
@@ -323,6 +331,7 @@ def make_wna16_moe_kernel(
         TrtLlmMxint4ExpertsMonolithic,
         XPUExpertsWNA16,
         CPUExpertsInt4,
+        ZentorchExpertsInt4,
         Int4EmulationTritonExperts,
     )
     if backend == WNA16MoEBackend.HUMMING:

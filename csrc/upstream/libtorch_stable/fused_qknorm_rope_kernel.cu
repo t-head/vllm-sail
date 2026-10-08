@@ -52,6 +52,16 @@ __device__ inline void __syncwarp() {
   #define FINAL_MASK 0xffffffff
 #endif
 
+// HGGC requires every named shuffle/barrier lane to participate. Partial
+// rotary dimensions leave only the low rotary_lanes lanes in the RoPE branch.
+#if defined(__HGGCCC__)
+  #define VLLM_SAIL_ROPE_MASK (FINAL_MASK >> (32 - rotary_lanes))
+  #define VLLM_SAIL_ROPE_SYNCWARP() __syncwarp(VLLM_SAIL_ROPE_MASK)
+#else
+  #define VLLM_SAIL_ROPE_MASK FINAL_MASK
+  #define VLLM_SAIL_ROPE_SYNCWARP() __syncwarp()
+#endif
+
 namespace tensorrt_llm::common {
 template <typename T, int num>
 struct packed_as;
@@ -267,13 +277,13 @@ __global__ void fusedQKNormRopeKernel(
         }
       } else {
         // Before data exchange with in warp, we need to sync.
-        __syncwarp();
+        VLLM_SAIL_ROPE_SYNCWARP();
         int pairOffset = (rotary_dim / 2) / numElemsPerThread;
         // Get the data from the other half of the warp. Use pre-computed
         // cos/sin values.
 #pragma unroll
         for (int i = 0; i < numElemsPerThread; i++) {
-          elements2[i] = __shfl_xor_sync(FINAL_MASK, elements[i], pairOffset);
+          elements2[i] = __shfl_xor_sync(VLLM_SAIL_ROPE_MASK, elements[i], pairOffset);
 
           if (laneId < pairOffset) {
             elements2[i] = -elements2[i];
@@ -288,7 +298,7 @@ __global__ void fusedQKNormRopeKernel(
           elements[i] = elements[i] * cos_val + elements2[i] * sin_val;
         }
         // __shfl_xor_sync does not provide memfence. Need to sync again.
-        __syncwarp();
+        VLLM_SAIL_ROPE_SYNCWARP();
       }
     }
     // Store.
@@ -518,11 +528,11 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
             elements[idx1] = val0 * sin_val + val1 * cos_val;
           }
         } else {
-          __syncwarp();
+          VLLM_SAIL_ROPE_SYNCWARP();
           int const pairOffset = (rotary_dim / 2) / numElemsPerThread;
 #pragma unroll
           for (int i = 0; i < numElemsPerThread; i++) {
-            elements2[i] = __shfl_xor_sync(FINAL_MASK, elements[i], pairOffset);
+            elements2[i] = __shfl_xor_sync(VLLM_SAIL_ROPE_MASK, elements[i], pairOffset);
             if (laneId < pairOffset) elements2[i] = -elements2[i];
             int dim_idx = laneId * numElemsPerThread + i;
             dim_idx = (dim_idx * 2) % rotary_dim;
@@ -531,7 +541,7 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
             float const sin_val = CacheConverter::convert(sin_smem[half_dim]);
             elements[i] = elements[i] * cos_val + elements2[i] * sin_val;
           }
-          __syncwarp();
+          VLLM_SAIL_ROPE_SYNCWARP();
         }
       }
 

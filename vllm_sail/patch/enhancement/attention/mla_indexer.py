@@ -43,7 +43,7 @@ import vllm_sail.utils.deep_gemm as _ppu_deep_gemm
 from vllm_sail.patch.bodies import bind_body
 from vllm_sail.patch.utils import patch, patch_value
 
-_AFFECTED = ">=0.30.0,<0.31.0"
+_AFFECTED = ">=0.31.0,<0.32.0"
 _MODULE = "vllm.v1.attention.backends.mla.indexer"
 
 
@@ -248,6 +248,7 @@ def _builder_init_body(self, *args, block_table_width: int, **kwargs) -> None:
     self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
     self.pcp_world_size = parallel_config.prefill_context_parallel_size
     self.use_pcp = self.pcp_world_size > 1
+    self.pcp_rank = get_pcp_group().rank_in_group if self.use_pcp else 0
     self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
     # NOTE(Chen):an estimated max size of flattened_kv. Need to double check.
     self.max_prefill_buffer_size = get_max_prefill_buffer_size(self.vllm_config)
@@ -436,7 +437,6 @@ def _build_body(
     assert num_decode_tokens + num_prefill_tokens == num_tokens
 
     compressed_slot_mapping = slot_mapping
-    compressed_seq_lens = seq_lens
     indexer_block_table = block_table
     if self.compress_ratio > 1:
         kernel_block_size = self.kernel_block_size
@@ -448,10 +448,18 @@ def _build_body(
             factor = self.kv_cache_spec.block_size // kernel_block_size
             indexer_block_table = (block_table[:, ::factor] // factor).contiguous()
         padded_num_tokens = num_tokens
-        if self.pcp_world_size > 1:
+        local_slot_mapping = slot_mapping
+        if self.use_pcp:
+            # The gathered layout holds each rank's local tokens, padded, in
+            # rank order, so this rank's segment lines up with query_start_loc.
             padded_num_tokens = slot_mapping.shape[0] // self.pcp_world_size
+            local_slot_mapping = slot_mapping[
+                self.pcp_rank * padded_num_tokens : (self.pcp_rank + 1)
+                * padded_num_tokens
+            ]
         compressed_slot_mapping = get_compressed_slot_mapping(
             num_tokens,
+            local_slot_mapping,
             query_start_loc,
             seq_lens,
             indexer_block_table,
@@ -464,10 +472,12 @@ def _build_body(
                 self.compressed_slot_mapping_buffer[:padded_num_tokens],
                 dim=0,
             )
-        compressed_seq_lens = seq_lens // self.compress_ratio
 
     prefill_metadata = None
     if num_prefills > 0:
+        compressed_seq_lens = (
+            seq_lens // self.compress_ratio if self.compress_ratio > 1 else seq_lens
+        )
         # This CPU value is an upper bound for async-spec extend rows.  It
         # is safe for chunking/allocation because CUDA metadata below is
         # built from exact device seq_lens and gather ignores the tail.
@@ -514,7 +524,7 @@ def _build_body(
             )
         else:
             chunk_specs = self._split_indexer_prefill_chunks(
-                compressed_seq_lens_cpu[num_decodes:],
+                self._prefill_split_seq_lens(compressed_seq_lens_cpu[num_decodes:]),
                 prefill_query_lens_cpu,
                 self.max_prefill_buffer_size,
                 max_logits_bytes,
