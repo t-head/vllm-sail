@@ -6,9 +6,6 @@ on:
       build_run_id:
         type: string
         required: true
-      tested_sha:
-        type: string
-        required: true
       matrix:
         type: string
         required: true
@@ -33,12 +30,10 @@ permissions:
   actions: read
 
 env:
-  GIT_CONFIG_NOSYSTEM: "1"
-  GIT_CONFIG_GLOBAL: /dev/null
   WHEELS_DIR: /tmp/device-wheels
   BUILD_MANIFEST_FILE: /tmp/device-build/build-manifest.txt
   SELECTION_FILE: /tmp/device-selection/selection.json
-  EXPECTED_SAIL_COMMIT: ${{ inputs.tested_sha }}
+  EXPECTED_SAIL_COMMIT: ${{ github.sha }}
   EXPECTED_VLLM_COMMIT: ${{ inputs.expected_vllm_commit }}
   EXPECTED_BUILD_RUN_ID: ${{ inputs.build_run_id }}
   EXPECTED_BUILD_IMAGE: ${{ inputs.build_image }}
@@ -59,6 +54,7 @@ jobs:
       max-parallel: 2
       matrix: ${{ fromJSON(inputs.matrix) }}
     env:
+      GIT_CONFIG_NOSYSTEM: "1"
       DEVICE_BOARD: ${{ matrix.board }}
       DEVICE_GROUP_ID: ${{ matrix.group_id }}
       DEVICE_RESULTS_DIR: /mnt/wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/device-tests/${{ matrix.group_id }}
@@ -66,9 +62,17 @@ jobs:
       run:
         shell: bash
     steps:
+      - name: 准备作业内独立 Git 配置
+        id: git-config
+        shell: bash
+        run: |
+          # checkout 会写入 safe.directory；配置文件需保留到 post 阶段。
+          config="$(mktemp "${RUNNER_TEMP}/git-config.XXXXXX")"
+          printf 'GIT_CONFIG_GLOBAL=%s\n' "$config" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tested_sha }}
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
           name: ppu-wheels-${{ inputs.build_run_id }}
@@ -105,7 +109,7 @@ jobs:
             /tmp/device-wheels
             /tmp/device-build
             /tmp/device-selection
-          extra_env: WHEELS_DIR=/workspace/source/device-wheels,BUILD_MANIFEST_FILE=/workspace/source/device-build/build-manifest.txt,SELECTION_FILE=/workspace/source/device-selection/selection.json,DEVICE_RESULTS_DIR=/mnt/wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/device-tests/${{ matrix.group_id }},DEVICE_BOARD=${{ matrix.board }},DEVICE_GROUP_ID=${{ matrix.group_id }},EXPECTED_SAIL_COMMIT=${{ inputs.tested_sha }},EXPECTED_VLLM_COMMIT=${{ inputs.expected_vllm_commit }},EXPECTED_BUILD_RUN_ID=${{ inputs.build_run_id }},EXPECTED_BUILD_IMAGE=${{ inputs.build_image }},CI_RUN_ID=${{ github.run_id }},CI_RUN_ATTEMPT=${{ github.run_attempt }},RUNTIME_IMAGE=${{ inputs.image }},QUALIFICATION_MODE=${{ inputs.qualification_mode }}
+          extra_env: WHEELS_DIR=/workspace/source/device-wheels,BUILD_MANIFEST_FILE=/workspace/source/device-build/build-manifest.txt,SELECTION_FILE=/workspace/source/device-selection/selection.json,DEVICE_RESULTS_DIR=/mnt/wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/device-tests/${{ matrix.group_id }},DEVICE_BOARD=${{ matrix.board }},DEVICE_GROUP_ID=${{ matrix.group_id }},EXPECTED_SAIL_COMMIT=${{ github.sha }},EXPECTED_VLLM_COMMIT=${{ inputs.expected_vllm_commit }},EXPECTED_BUILD_RUN_ID=${{ inputs.build_run_id }},EXPECTED_BUILD_IMAGE=${{ inputs.build_image }},CI_RUN_ID=${{ github.run_id }},CI_RUN_ATTEMPT=${{ github.run_attempt }},RUNTIME_IMAGE=${{ inputs.image }},QUALIFICATION_MODE=${{ inputs.qualification_mode }}
           container_options: |
             privileged: true
             host_ipc: true
@@ -142,7 +146,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tested_sha }}
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
           name: ${{ inputs.selection_artifact }}

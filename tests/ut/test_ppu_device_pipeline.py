@@ -7,6 +7,8 @@ import copy
 import importlib.util
 import itertools
 import json
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -369,3 +371,150 @@ def test_reusable_workflow_contract():
     assert all("/wl_nas/devops/" in s["with"]["path"] for s in uploads)
     assert jobs["device-summary"]["if"] == "always()"
     assert "continue-on-error" not in path.read_text()
+
+
+@pytest.mark.parametrize(
+    "filename,job_id",
+    [
+        ("build-ppu-wheels.yaml", "device-build"),
+        ("ppu-device-tests.yaml", "device-tests"),
+    ],
+)
+def test_container_checkout_uses_isolated_regular_git_config(
+    filename, job_id, tmp_path
+):
+    workflow = yaml.safe_load((ROOT / ".github/workflows" / filename).read_text())
+    job = workflow["jobs"][job_id]
+    job_env = {**workflow.get("env", {}), **job.get("env", {})}
+    assert job_env["GIT_CONFIG_NOSYSTEM"] == "1"
+    assert "GIT_CONFIG_GLOBAL" not in job_env
+    steps = job["steps"]
+    prepare = next((s for s in steps if s.get("id") == "git-config"), None)
+    assert prepare is not None, "checkout 前必须准备可写的独立 Git 配置"
+    checkout = next(s for s in steps if s.get("uses") == "actions/checkout@v4")
+    assert steps.index(prepare) < steps.index(checkout)
+    assert "if" not in prepare
+    assert prepare["shell"] == "bash"
+
+    # 模拟镜像和 checkout 临时 HOME 中的配置，不修改用户或系统配置。
+    home = tmp_path / "home"
+    home.mkdir()
+    original = '[url "https://mirror.invalid/"]\n\tinsteadOf = https://github.com/\n'
+    global_config = home / ".gitconfig"
+    global_config.write_text(original)
+    system_config = tmp_path / "system.gitconfig"
+    system_config.write_text(original)
+    runner_temp = tmp_path / "runner temp"
+    runner_temp.mkdir()
+    exports = tmp_path / "github-env"
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if not k.startswith("GIT_") and k not in {"BASH_ENV", "ENV"}
+    }
+    env.update(
+        HOME=str(home),
+        XDG_CONFIG_HOME=str(home),
+        GIT_CONFIG_SYSTEM=str(system_config),
+        RUNNER_TEMP=str(runner_temp),
+        GITHUB_ENV=str(exports),
+    )
+    url = "https://github.com/t-head/vllm-sail"
+
+    def git(*args, environment):
+        return subprocess.run(
+            ["git", *args],
+            cwd=tmp_path,
+            env=environment,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    assert git("ls-remote", "--get-url", url, environment=env) != url
+    env["GIT_CONFIG_NOSYSTEM"] = job_env["GIT_CONFIG_NOSYSTEM"]
+    paths = []
+    for _ in range(2):
+        exports.write_text("")
+        subprocess.run(
+            ["bash", "--noprofile", "--norc", "-euo", "pipefail", "-c", prepare["run"]],
+            cwd=tmp_path,
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        values = dict(line.split("=", 1) for line in exports.read_text().splitlines())
+        assert set(values) == {"GIT_CONFIG_GLOBAL"}
+        path = Path(values["GIT_CONFIG_GLOBAL"])
+        assert path.is_file() and not path.is_symlink()
+        assert path.parent == runner_temp
+        assert path.read_text() == ""
+        assert path.stat().st_mode & 0o777 == 0o600
+        paths.append(path)
+        isolated_env = {**env, **values}
+        assert git("ls-remote", "--get-url", url, environment=isolated_env) == url
+        # 以普通文件写入模拟 safe.directory，验证临时 HOME 不能覆盖隔离配置。
+        path.write_text("[safe]\n\tdirectory = /workspace/source\n")
+        assert (
+            git(
+                "config",
+                "--global",
+                "--get-all",
+                "safe.directory",
+                environment=isolated_env,
+            )
+            == "/workspace/source"
+        )
+    assert paths[0] != paths[1]
+    assert global_config.read_text() == system_config.read_text() == original
+
+
+def test_summary_does_not_inherit_container_git_config():
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/ppu-device-tests.yaml").read_text()
+    )
+    job = workflow["jobs"]["device-summary"]
+    env = {**workflow.get("env", {}), **job.get("env", {})}
+    assert "GIT_CONFIG_GLOBAL" not in env
+    assert "GIT_CONFIG_NOSYSTEM" not in env
+
+
+@pytest.mark.parametrize(
+    "filename,job_id",
+    [
+        ("build-ppu-wheels.yaml", "detect-device-changes"),
+        ("build-ppu-wheels.yaml", "device-build"),
+        ("build-ppu-wheels.yaml", "select-device-tests"),
+        ("ppu-device-tests.yaml", "device-tests"),
+        ("ppu-device-tests.yaml", "device-summary"),
+    ],
+)
+def test_device_checkout_is_bound_to_workflow_sha(filename, job_id):
+    workflow = yaml.safe_load((ROOT / ".github/workflows" / filename).read_text())
+    checkout = next(
+        s
+        for s in workflow["jobs"][job_id]["steps"]
+        if s.get("uses") == "actions/checkout@v4"
+    )
+    assert checkout["with"]["ref"] == "${{ github.sha }}"
+    assert checkout["with"]["persist-credentials"] is False
+
+
+def test_device_identity_cannot_be_overridden_by_reusable_input():
+    caller = yaml.safe_load(
+        (ROOT / ".github/workflows/build-ppu-wheels.yaml").read_text()
+    )
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/ppu-device-tests.yaml").read_text()
+    )
+    triggers = workflow.get(True, workflow.get("on", {}))
+    assert "tested_sha" not in triggers["workflow_call"]["inputs"]
+    assert "tested_sha" not in caller["jobs"]["device-tests"]["with"]
+    assert workflow["env"]["EXPECTED_SAIL_COMMIT"] == "${{ github.sha }}"
+    scheduler = next(
+        s
+        for s in workflow["jobs"]["device-tests"]["steps"]
+        if "ppu-scheduler-action" in s.get("uses", "")
+    )
+    assert "EXPECTED_SAIL_COMMIT=${{ github.sha }}," in scheduler["with"]["extra_env"]
