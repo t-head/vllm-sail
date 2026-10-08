@@ -513,39 +513,14 @@ def _forward(
                     )
                     core_attn_out_non_spec = flashkda_out
                     last_recurrent_state = final_state
-                    state_len = conv_state.shape[-1]
-                    width = mixed_qkv_ns.shape[-1]
-                    recurrent_row_size = checkpoint_state[0].numel()
-                    block_size = 256
-                    _store_cache_checkpoints_kernel[
-                        (
-                            checkpoint_offsets.numel(),
-                            triton.cdiv(
-                                max(width * state_len, recurrent_row_size),
-                                block_size,
-                            ),
-                        )
-                    ](
-                        mixed_qkv_ns,
-                        conv_state,
-                        checkpoint_state,
-                        recurrent_state,
-                        non_spec_query_start_loc,
-                        checkpoint_offsets,
-                        checkpoint.state_indices,
-                        mixed_qkv_ns.stride(0),
-                        mixed_qkv_ns.stride(1),
-                        conv_state.stride(0),
-                        conv_state.stride(1),
-                        conv_state.stride(2),
-                        checkpoint_state.stride(0),
-                        recurrent_state.stride(0),
-                        checkpoint_offsets.stride(0),
-                        state_len,
-                        width,
-                        recurrent_row_size,
-                        NULL_BLOCK_ID,
-                        block_size,
+                    assert self._checkpoint_exporter is not None
+                    self._checkpoint_exporter.export(
+                        checkpoint,
+                        raw_qkv=mixed_qkv_ns,
+                        conv_state=conv_state,
+                        recurrent_checkpoint=checkpoint_state,
+                        recurrent_state=recurrent_state,
+                        cu_seqlens=non_spec_query_start_loc,
                     )
                 else:
                     (
@@ -835,7 +810,10 @@ def _init(
     self._flashkda_buffer_specs: (
         tuple[tuple[tuple[int, ...], torch.dtype], ...] | None
     ) = None
-    self._flashinfer_kda_output_spec: tuple[tuple[int, ...], torch.dtype] | None = None
+    self._flashinfer_kda_output_spec: tuple[tuple[int, ...], torch.dtype] | None = (
+        None
+    )
+    self._checkpoint_exporter: FlashKDAPrefillCheckpointExporter | None = None
     if self.kda_prefill_backend == "flashkda":
         T = vllm_config.scheduler_config.max_num_batched_tokens
         N = vllm_config.scheduler_config.max_num_seqs
@@ -855,6 +833,7 @@ def _init(
             ((N, H, D, D), self.get_state_dtype()[1]),
             ((workspace_size,), torch.uint8),
         )
+        self._checkpoint_exporter = FlashKDAPrefillCheckpointExporter()
     elif self.kda_prefill_backend == "flashinfer":
         T = vllm_config.scheduler_config.max_num_batched_tokens
         H, D = self.local_num_heads, self.head_dim
@@ -890,7 +869,7 @@ def _init(
     )
     self.gemm_rs_ar = None
     if run_gemm_rs_ar:
-        from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import (
+        from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import (
             get_gemm_rs_ar,
         )
 

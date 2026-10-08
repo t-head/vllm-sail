@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import sys
 
+import torch
 from vllm.models.deepseek_v4.nvidia.flashmla import (
     DeepseekV4FlashMLAAttention as NvidiaDeepseekV4FlashMLAAttention,
 )
@@ -78,6 +79,7 @@ def fused_indexer_q_rope_quant(
     index_weights_softmax_scale,
     index_weights_head_scale,
     use_fp4=False,
+    weights_out_dtype=torch.float32,
 ):
     original = getattr(fused_indexer_q_rope_quant, PATCH_MARKER)[
         f"{_Q_MODULE}.fused_indexer_q_rope_quant"
@@ -87,6 +89,7 @@ def fused_indexer_q_rope_quant(
         and current_platform.is_device_capability((8, 0))
         and not use_fp4
     ):
+        assert weights_out_dtype == torch.float32, weights_out_dtype
         from vllm_sail.models.deepseek_v4.ops.indexer import (
             fused_indexer_q_rope_quant_int8,
         )
@@ -107,6 +110,7 @@ def fused_indexer_q_rope_quant(
         index_weights_softmax_scale,
         index_weights_head_scale,
         use_fp4=use_fp4,
+        weights_out_dtype=weights_out_dtype,
     )
 
 

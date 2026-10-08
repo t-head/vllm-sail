@@ -180,9 +180,7 @@ def _forward_impl_body(
             mqa_q_pe = mqa_pe_padded
 
         if self.is_aiter_triton_fp4_bmm_enabled:
-            from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
-
-            mqa_ql_nope = batched_gemm_a16wfp4(
+            mqa_ql_nope = rocm_aiter_ops.batched_gemm_a16wfp4(
                 mqa_q_nope,
                 self.W_K,
                 self.W_K_scale,
@@ -210,7 +208,7 @@ def _forward_impl_body(
                 mqa_q_nope,
                 self.impl._w_uk_packed,  # type: ignore[attr-defined]
                 True,
-                None,
+                self.impl._w_scale,  # type: ignore[attr-defined]
             )
             mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
         else:
