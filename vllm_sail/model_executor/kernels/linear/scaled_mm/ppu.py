@@ -26,6 +26,10 @@ from vllm.model_executor.layers.quantization.utils.int8_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
+    kFp8DynamicTensorSym,
+    kFp8DynamicTokenSym,
+    kFp8StaticChannelSym,
+    kFp8StaticTensorSym,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     convert_to_channelwise,
@@ -361,7 +365,7 @@ class PPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
 
 
 class PPUDeepGemmFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
-    """PPU DeepGEMM kernel for FP8 channelwise (per-channel weight scale)."""
+    """PPU DeepGEMM for FP8 tensor or channel weights and tensor or token inputs."""
 
     @classmethod
     def is_supported(cls, compute_capability=None):
@@ -377,6 +381,14 @@ class PPUDeepGemmFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     def can_implement(cls, config: FP8ScaledMMLinearLayerConfig):
         if config.out_dtype != torch.bfloat16:
             return False, "Supports only output dtype of bfloat16"
+        if config.activation_quant_key not in (
+            kFp8DynamicTokenSym,
+            kFp8DynamicTensorSym,
+            kFp8StaticTensorSym,
+        ) or config.weight_quant_key not in (kFp8StaticChannelSym, kFp8StaticTensorSym):
+            return False, (
+                "Requires tensor/token activation scales and tensor/channel weight scales"
+            )
         if not should_use_deepgemm_for_fp8_linear(
             config.out_dtype, config.weight_shape
         ):
@@ -409,6 +421,11 @@ class PPUDeepGemmFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         # transpose, now correct N = B.shape[0].
         M = A.shape[0]
         N = B.shape[0]
+        # The SDK selects channelwise GEMM only for [M, 1] / [N, 1] scales.
+        # DSpark's FP8 tensor weights can carry a scalar scale; expand it
+        # without changing the quantization values or entering block GEMM.
+        As = As.reshape(-1, 1).expand(M, 1).contiguous()
+        Bs = Bs.reshape(-1, 1).expand(N, 1).contiguous()
         output = torch.empty((M, N), dtype=out_dtype, device=A.device)
         torch.ops.vllm.w8a8_fp8_matmul_deepgemm(A, As, B, Bs, output)
         if bias is not None:
