@@ -29,7 +29,7 @@ from vllm.v1.attention.ops import flashmla as _flashmla_ops
 
 from vllm_sail.patch.utils import PATCH_MARKER, patch
 
-_AFFECTED = ">=0.30.0,<0.31.0"
+_AFFECTED = ">=0.31.0,<0.32.0"
 _MODULE = "vllm.v1.attention.ops.flashmla"
 
 _upstream_is_flashmla_available = _flashmla_ops._is_flashmla_available
@@ -63,10 +63,13 @@ _FLASHMLA_ALIAS_CONSUMERS = {
     ),
     "get_mla_metadata_dense_fp8": ("vllm.v1.attention.backends.mla.flashmla",),
     "is_flashmla_dense_supported": ("vllm.v1.attention.backends.mla.flashmla",),
+    "is_flashmla_sparse_supported": (
+        "vllm.models.deepseek_v41.nvidia.flash_mla_mega_attn",
+    ),
 }
 
 _ALIAS_REASON = (
-    "vLLM 0.30 captured the upstream FlashMLA op before PPU patch "
+    "vLLM 0.31 captured the upstream FlashMLA op before PPU patch "
     "installation, so the consumer would bypass the PPU provider or retain "
     "CUDA-only capability checks."
 )

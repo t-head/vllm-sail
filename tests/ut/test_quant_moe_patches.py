@@ -222,8 +222,10 @@ def _build_fused_moe_stubs(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     _register_chain(monkeypatch, "vllm.model_executor.layers.fused_moe.utils", utils)
 
     class TritonExperts:
-        def moe_sum(self, input, output):
-            state.setdefault("upstream_moe_sum", []).append((input, output))
+        def moe_sum(self, input, output, topk_ids=None, expert_map=None):
+            state.setdefault("upstream_moe_sum", []).append(
+                (input, output, topk_ids, expert_map)
+            )
 
     triton_moe = types.ModuleType(
         "vllm.model_executor.layers.fused_moe.experts.triton_moe"
@@ -427,13 +429,11 @@ def test_mxfp4_quantize_alias_inventory_matches_vllm_source() -> None:
 def test_triton_moe_sum_prefers_triton_reduce_on_ppu(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    torch = pytest.importorskip("torch")
-
     module = _leaf("fused_moe_ppu")
     state = _build_fused_moe_stubs(monkeypatch)
     module.install()
 
-    seen: list[tuple[torch.Tensor, torch.Tensor]] = []
+    seen = []
     kernels = types.ModuleType(
         "vllm_sail.model_executor.layers.fused_moe.triton_kernels"
     )
@@ -441,22 +441,28 @@ def test_triton_moe_sum_prefers_triton_reduce_on_ppu(
     _register_chain(monkeypatch, kernels.__name__, kernels)
 
     experts = state["triton_moe"].TritonExperts()
-    big_in = torch.zeros(1025, 4)
-    out = torch.zeros(1, 4)
+    big_in = types.SimpleNamespace(shape=(1025, 4))
+    out = object()
     _Platform.ppu = True
     experts.moe_sum(big_in, out)
     assert seen == [(big_in, out)]
     assert "upstream_moe_sum" not in state
 
-    small_in = torch.zeros(16, 4)
+    small_in = types.SimpleNamespace(shape=(16, 4))
     experts.moe_sum(small_in, out)
-    assert state["upstream_moe_sum"] == [(small_in, out)]
+    assert state["upstream_moe_sum"] == [(small_in, out, None, None)]
+
+    topk_ids, expert_map = object(), object()
+    seen.clear()
+    experts.moe_sum(big_in, out, topk_ids, expert_map)
+    assert seen == []
+    assert state["upstream_moe_sum"][-1] == (big_in, out, topk_ids, expert_map)
 
     seen.clear()
     _Platform.ppu = False
     experts.moe_sum(big_in, out)
     assert seen == []
-    assert state["upstream_moe_sum"][-1] == (big_in, out)
+    assert state["upstream_moe_sum"][-1] == (big_in, out, None, None)
     _Platform.ppu = True
 
 

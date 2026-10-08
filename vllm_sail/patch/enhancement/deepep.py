@@ -17,7 +17,7 @@ from vllm_sail.patch.utils import PATCH_MARKER, patch
 _MODULE = "vllm.model_executor.layers.fused_moe.all2all_utils"
 _META = dict(
     reason="The all-to-all factory needs PPU DeepEP quantized dispatch and completion support.",
-    affected_versions=">=0.30.0,<0.31.0",
+    affected_versions=">=0.31.0,<0.32.0",
     remove_when="The prepare/finalize factory supports plugin backend registration.",
 )
 
@@ -33,6 +33,7 @@ def _maybe_make_prepare_finalize_body(
     allow_new_interface: bool = False,
     use_monolithic: bool = False,
     all2all_manager: Any | None = None,
+    input_dtype: torch.dtype | None = None,
 ) -> FusedMoEPrepareAndFinalize | None:
     if not moe.moe_parallel_config.use_all2all_kernels:
         if not allow_new_interface:
@@ -169,6 +170,29 @@ def _maybe_make_prepare_finalize_body(
             num_topk=moe.experts_per_token,
             use_fp8_dispatch=use_fp8_dispatch,
             use_cudagraph=use_cudagraph,
+            sp_size=moe.moe_parallel_config.sp_size,
+        )
+
+    elif moe.use_moonep_kernels:
+        all_to_all_args = dict(
+            max_num_tokens_per_dp_rank=moe.max_num_tokens,
+            token_hidden_size=moe.hidden_dim,
+            num_topk=moe.experts_per_token,
+            num_global_experts=moe.num_experts,
+            num_prefetch_slots=MOONEP_DEFAULT_NUM_PREFETCH_SLOTS,
+            token_padding=MOONEP_DEFAULT_TOKEN_PADDING,
+            num_sms=MOONEP_DEFAULT_NUM_SMS,
+        )
+        handle = all2all_manager.get_handle(all_to_all_args)
+
+        # The [E+B] weight layout is picked up from the experts (their
+        # process_weights_after_loading hook) once the layer has loaded and
+        # converted its weights.
+        prepare_finalize = MoonEPPrepareAndFinalize(
+            buffer_pool=handle,
+            max_tokens_per_rank=moe.max_num_tokens,
+            num_dispatchers=all2all_manager.world_size,
+            num_global_experts=moe.num_experts,
         )
 
     elif moe.use_mori_kernels:
@@ -177,13 +201,20 @@ def _maybe_make_prepare_finalize_body(
         # Note: We may want to use FP8 dispatch just to reduce
         # data movement.
         use_fp8_dispatch = (
-            quant_config.is_per_act_token or quant_config.is_block_quantized
+            quant_config.is_per_act_token
+            or quant_config.is_block_quantized
+            or quant_config.is_per_tensor
         )
         if use_fp8_dispatch:
-            # For PTPC (per token per channel) quant, scale dim is 1
-            # For 1x128 quant, scale dim is hidden_dim // 128
+            # For PTPC (per token per channel) or per-tensor quant,
+            # scale dim is 1. For 1x128 quant, scale dim is
+            # hidden_dim // 128
             quant_dtype = quant_config.quant_dtype
-            scale_dim = 1 if quant_config.is_per_act_token else moe.hidden_dim // 128
+            scale_dim = (
+                1
+                if (quant_config.is_per_act_token or quant_config.is_per_tensor)
+                else moe.hidden_dim // 128
+            )
         else:
             # Unquantized dispatch (e.g. AITER with defer_input_quant):
             # dispatch raw BF16/FP16 data, no scales needed.
@@ -222,7 +253,7 @@ def _maybe_make_prepare_finalize_body(
             get_current_vllm_config().scheduler_config.max_num_batched_tokens
         )
         dispatch_layout = flashinfer_one_sided_dispatch_layout(
-            moe.hidden_dim, quant_config
+            moe.hidden_dim, quant_config, input_dtype=input_dtype
         )
         prepare_finalize = FlashInferNVLinkOneSidedPrepareAndFinalize(
             max_num_tokens=max_num_tokens,
@@ -302,7 +333,6 @@ def maybe_roundup_layer_hidden_size(hidden_size, act_dtype, moe_parallel_config)
 _CONSUMERS = {
     "maybe_make_prepare_finalize": [
         "vllm.model_executor.layers.fused_moe.eep_reconfigure",
-        "vllm.model_executor.layers.fused_moe.oracle.int_wna16",
         "vllm.model_executor.layers.fused_moe.oracle.fp8",
         "vllm.model_executor.layers.fused_moe.oracle.w4a8_int8",
         "vllm.model_executor.layers.fused_moe.oracle.unquantized",
@@ -310,7 +340,7 @@ _CONSUMERS = {
         "vllm.model_executor.layers.fused_moe.oracle.w4a8",
         "vllm.model_executor.layers.fused_moe.oracle.mxfp4",
         "vllm.model_executor.layers.fused_moe.oracle.int8",
-        "vllm.model_executor.layers.quantization.utils.humming_utils",
+        "vllm.model_executor.layers.quantization.utils.humming.moe",
     ],
     "maybe_roundup_layer_hidden_size": [],
 }

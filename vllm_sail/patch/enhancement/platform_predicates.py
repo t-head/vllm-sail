@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from vllm_sail.patch.utils import patch
 
-_AFFECTED = ">=0.30.0,<0.31.0"
+_AFFECTED = ">=0.31.0,<0.32.0"
 
 
 @patch(

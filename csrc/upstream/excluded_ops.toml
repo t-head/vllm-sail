@@ -6,7 +6,7 @@
 # tiers. vllm_sail/native/stubs.py registers each one so a call fails
 # with a named NotImplementedError instead of an AttributeError, and so
 # capability probes answer False instead of raising.
-# Upstream vLLM v0.30.0; compiled tiers a.
+# Upstream vLLM v0.31.0; compiled tiers a.
 
 [[op]]
 namespace = "_C_custom_ar"
@@ -23,14 +23,6 @@ schema = "allocate_shared_buffer_and_handle(int size) -> (int, Tensor)"
 kind = "compute"
 tier = "b"
 reason = "no PPU implementation"
-
-[[op]]
-namespace = "_C"
-name = "allspark_w8a16_gemm"
-schema = "allspark_w8a16_gemm(Tensor a, Tensor b_qweight, Tensor b_scales, Tensor? b_qzeros, SymInt n, SymInt group_size, SymInt sm_count, SymInt sm_version, SymInt CUBLAS_M_THRESHOLD, bool has_zp, bool n32k16_reorder) -> Tensor"
-kind = "compute"
-tier = "unclaimed"
-reason = "not declared in csrc/upstream/manifest.toml"
 
 [[op]]
 namespace = "_C"
@@ -226,6 +218,14 @@ reason = "no PPU implementation"
 
 [[op]]
 namespace = "_C"
+name = "fused_deepseek_v4_kv_rope_insert"
+schema = "fused_deepseek_v4_kv_rope_insert(Tensor kv, Tensor! k_cache, Tensor slot_mapping, Tensor position_ids, Tensor cos_sin_cache, int cache_block_size, Tensor? fp8_scale=None, bool kv_mxfp8=False) -> ()"
+kind = "compute"
+tier = "unclaimed"
+reason = "not declared in csrc/upstream/manifest.toml"
+
+[[op]]
+namespace = "_C"
 name = "fused_gdn_decode_post_conv_mtp"
 schema = "fused_gdn_decode_post_conv_mtp(Tensor mixed_qkv, Tensor a, Tensor b, Tensor A_log, Tensor dt_bias, Tensor state_indices, Tensor cu_seqlens, Tensor num_accepted_tokens, Tensor! state, Tensor output_gate, Tensor norm_weight, Tensor! out, float scale, float norm_eps=1e-5, str output_gate_activation='silu') -> ()"
 kind = "compute"
@@ -347,7 +347,7 @@ reason = "not declared in csrc/upstream/manifest.toml"
 [[op]]
 namespace = "_C_cache_ops"
 name = "hisparse_resolve_residency"
-schema = "hisparse_resolve_residency(Tensor host_cache,                 Tensor! hot_cache,                 Tensor hot_block_table,                 Tensor global_indices,                 Tensor! hot_indices,                 Tensor! device_global_indices,                 Tensor! lru_slots,                 Tensor? request_state_indices,                 int region_stride,                 Tensor(a!)? miss_mask=None,                 Tensor(b!)? stats=None,                 Tensor(c!)? attention_indices=None,                 int attention_block_stride=0,                 Tensor? request_ids=None,                 Tensor? source_block_table=None,                 int source_block_size=0,                 Tensor(d!)? resolved_global_indices=None,                 Tensor(e!)? valid_counts=None,                 Tensor(f!)? swap_host_physical_rows=None,                 Tensor(g!)? swap_device_physical_rows=None,                 Tensor(h!)? swap_counts=None,                 Tensor? resident_block_table=None,                 int resident_block_size=0,                 int resident_null_block=0) -> ()"
+schema = "hisparse_resolve_residency(Tensor host_cache,                 Tensor! hot_cache,                 Tensor hot_block_table,                 Tensor global_indices,                 Tensor! hot_indices,                 Tensor! device_global_indices,                 Tensor! lru_slots,                 Tensor? request_state_indices,                 int region_stride,                 int max_union_rows,                 Tensor(a!)? miss_mask=None,                 Tensor(b!)? stats=None,                 Tensor(c!)? attention_indices=None,                 int attention_block_stride=0,                 Tensor? request_ids=None,                 Tensor? source_block_table=None,                 int source_block_size=0,                 Tensor(d!)? resolved_global_indices=None,                 Tensor(e!)? valid_counts=None,                 Tensor(f!)? swap_host_physical_rows=None,                 Tensor(g!)? swap_device_physical_rows=None,                 Tensor(h!)? swap_counts=None,                 Tensor? resident_block_table=None,                 int resident_block_size=0,                 int resident_null_block=0) -> ()"
 kind = "compute"
 tier = "unclaimed"
 reason = "not declared in csrc/upstream/manifest.toml"
@@ -466,6 +466,14 @@ reason = "not declared in csrc/upstream/manifest.toml"
 
 [[op]]
 namespace = "_moe_C"
+name = "moe_prepare_scatter"
+schema = "moe_prepare_scatter(Tensor topk_ids, Tensor token_expert_indices, Tensor? expert_map, int n_expert, int n_local_expert, Tensor! expert_first_token_offset, Tensor! scatter_idx, Tensor! sort_workspace, Tensor! sorted_experts, Tensor! sorted_rows, Tensor! topk_ids_for_sort)->()"
+kind = "compute"
+tier = "unclaimed"
+reason = "not declared in csrc/upstream/manifest.toml"
+
+[[op]]
+namespace = "_moe_C"
 name = "moe_unpermute"
 schema = "moe_unpermute(Tensor permuted_hidden_states, Tensor topk_weights,Tensor inv_permuted_idx, Tensor? expert_first_token_offset, int topk, Tensor! hidden_states)->()"
 kind = "compute"
@@ -511,14 +519,6 @@ schema = "open_mem_handle(Tensor mem_handle) -> int"
 kind = "compute"
 tier = "b"
 reason = "no PPU implementation"
-
-[[op]]
-namespace = "_C"
-name = "rearrange_kn_weight_as_n32k16_order"
-schema = "rearrange_kn_weight_as_n32k16_order(Tensor b_qweight, Tensor b_scales, Tensor? b_zeros, bool has_zp, Tensor! b_qweight_reorder, Tensor! b_scales_reorder, Tensor!? b_zeros_reorder, int K, int N, int N_32align) -> ()"
-kind = "compute"
-tier = "unclaimed"
-reason = "not declared in csrc/upstream/manifest.toml"
 
 [[op]]
 namespace = "_C_custom_ar"

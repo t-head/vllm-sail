@@ -28,7 +28,7 @@ def test_build_script_preserves_required_build_contract() -> None:
         "unset TORCH_CUDA_ARCH_LIST",
         "command -v hgcc",
         "command -v nvcc",
-        "python use_existing_torch.py",
+        "python tools/use_existing_torch.py",
         "VLLM_TARGET_DEVICE=empty",
         "VLLM_REQUIRE_RUST_FRONTEND=1",
         "CARGO_BUILD_JOBS",

@@ -15,7 +15,7 @@ from vllm.model_executor.layers.attention import mla_attention as _mla_attention
 from vllm_sail.patch.bodies import bind_body
 from vllm_sail.patch.utils import patch
 
-_AFFECTED = ">=0.30.0,<0.31.0"
+_AFFECTED = ">=0.31.0,<0.32.0"
 _MODULE = "vllm.model_executor.layers.attention.mla_attention"
 
 
@@ -180,9 +180,7 @@ def _forward_impl_body(
             mqa_q_pe = mqa_pe_padded
 
         if self.is_aiter_triton_fp4_bmm_enabled:
-            from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
-
-            mqa_ql_nope = batched_gemm_a16wfp4(
+            mqa_ql_nope = rocm_aiter_ops.batched_gemm_a16wfp4(
                 mqa_q_nope,
                 self.W_K,
                 self.W_K_scale,
@@ -210,7 +208,7 @@ def _forward_impl_body(
                 mqa_q_nope,
                 self.impl._w_uk_packed,  # type: ignore[attr-defined]
                 True,
-                None,
+                self.impl._w_scale,  # type: ignore[attr-defined]
             )
             mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
         else:

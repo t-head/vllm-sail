@@ -46,15 +46,15 @@ quoting prevents the shell from interpreting the semicolon as a command boundary
 
 Install a vLLM build with `VLLM_TARGET_DEVICE=empty` in the same environment.
 This lets the PPU plugin provide the native operations used by the engine.
-The plugin accepts `>=0.30.0,<0.31.0`; its generated upstream kernel sources use
-**v0.30.0** as the reproducible source baseline.
+The plugin accepts `>=0.31.0,<0.32.0`; its generated upstream kernel sources use
+**v0.31.0** as the reproducible source baseline.
 
 Use a matching wheel supplied with your PPU environment, or build that upstream
 release from source. For a source build, first prepare vLLM's build and runtime
 dependencies using the SDK's package constraints. Then run from the vLLM checkout:
 
 ```bash
-python use_existing_torch.py
+python tools/use_existing_torch.py
 VLLM_TARGET_DEVICE=empty python -m pip install --no-build-isolation --no-deps .
 ```
 
