@@ -43,6 +43,7 @@ def installed(monkeypatch, patch_utils_module):
         is_ppu=lambda: platform.ppu,
         is_device_capability=lambda cap: platform.capability == cap,
     )
+    module("torch", float32="float32", bfloat16="bfloat16")
     module("vllm.platforms", current_platform=platform)
     attention_cls = type("Attention", (), {})
     module(f"{BASE}.nvidia.flashmla", DeepseekV4FlashMLAAttention=attention_cls)
@@ -132,7 +133,27 @@ def test_other_query_paths_delegate(installed, ppu, capability, use_fp4):
         )
         == "upstream_q"
     )
-    assert calls[-1][2] == {"use_fp4": use_fp4}
+    assert calls[-1][2] == {
+        "use_fp4": use_fp4,
+        "weights_out_dtype": "float32",
+    }
+
+
+def test_fp4_query_forwards_scoring_weights_dtype(installed):
+    _, modules, calls, _ = installed
+    modules[Q_PROVIDER].fused_indexer_q_rope_quant(
+        *range(6), use_fp4=True, weights_out_dtype="bfloat16"
+    )
+    assert calls[-1][2]["weights_out_dtype"] == "bfloat16"
+
+
+def test_int8_query_requires_float32_scoring_weights(installed):
+    _, modules, calls, _ = installed
+    with pytest.raises(AssertionError):
+        modules[Q_PROVIDER].fused_indexer_q_rope_quant(
+            *range(6), weights_out_dtype="bfloat16"
+        )
+    assert not calls
 
 
 @pytest.mark.parametrize("consumer", [K_PROVIDER, f"{BASE}.compressor"])

@@ -18,7 +18,7 @@ schema = 1
 
 # The exact upstream vLLM tag the corpus is translated from. Bumping this means
 # re-running tools/port_upstream_kernels.py and reviewing the diff.
-upstream_ref = "v0.30.0"
+upstream_ref = "v0.31.0"
 
 # Compiled tiers, in the order CMake receives them. `x` must never appear here.
 # Must stay above [tiers]: a bare key after a table header belongs to that table.
@@ -111,6 +111,13 @@ _moe_C_stable_libtorch = "_upstream_moe_C"
 "void cp_async_wait_group() {\n#if defined(COMPATIBLE_ARCH)" = "void cp_async_wait_group() {\n#if defined(__HGGCCC__)\n  __syncwarp();\n#elif defined(COMPATIBLE_ARCH)"
 
 [overlay.replace_text."csrc/libtorch_stable/fused_qknorm_rope_kernel.cu"]
+"#endif\n\nnamespace tensorrt_llm::common {" = "#endif\n\n// HGGC requires every named shuffle/barrier lane to participate. Partial\n// rotary dimensions leave only the low rotary_lanes lanes in the RoPE branch.\n#if defined(__HGGCCC__)\n  #define VLLM_SAIL_ROPE_MASK (FINAL_MASK >> (32 - rotary_lanes))\n  #define VLLM_SAIL_ROPE_SYNCWARP() __syncwarp(VLLM_SAIL_ROPE_MASK)\n#else\n  #define VLLM_SAIL_ROPE_MASK FINAL_MASK\n  #define VLLM_SAIL_ROPE_SYNCWARP() __syncwarp()\n#endif\n\nnamespace tensorrt_llm::common {"
+"// Before data exchange with in warp, we need to sync.\n        __syncwarp();" = "// Before data exchange with in warp, we need to sync.\n        VLLM_SAIL_ROPE_SYNCWARP();"
+"\n          elements2[i] = __shfl_xor_sync(FINAL_MASK, elements[i], pairOffset);" = "\n          elements2[i] = __shfl_xor_sync(VLLM_SAIL_ROPE_MASK, elements[i], pairOffset);"
+"// __shfl_xor_sync does not provide memfence. Need to sync again.\n        __syncwarp();" = "// __shfl_xor_sync does not provide memfence. Need to sync again.\n        VLLM_SAIL_ROPE_SYNCWARP();"
+"        } else {\n          __syncwarp();\n          int const pairOffset" = "        } else {\n          VLLM_SAIL_ROPE_SYNCWARP();\n          int const pairOffset"
+"\n            elements2[i] = __shfl_xor_sync(FINAL_MASK, elements[i], pairOffset);" = "\n            elements2[i] = __shfl_xor_sync(VLLM_SAIL_ROPE_MASK, elements[i], pairOffset);"
+"          __syncwarp();\n        }\n      }\n\n      // Store." = "          VLLM_SAIL_ROPE_SYNCWARP();\n        }\n      }\n\n      // Store."
 "  // Select token_heads_per_warp: forced value if >0, else auto-select." = "  if (num_tokens == 0) return;\n\n  // Select token_heads_per_warp: forced value if >0, else auto-select."
 
 # ---------------------------------------------------------------------------

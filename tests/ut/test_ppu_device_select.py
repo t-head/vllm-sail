@@ -43,9 +43,9 @@ def test_real_config_and_full_routes(selector, config):
     result = selector.select_tests(config, ["csrc/unknown.cu"], **OPTIONS)
     assert result["mode"] == "full"
     assert "native_change" in result["reasons"]
-    assert len(result["test_ids"]) == 13
+    assert len(result["test_ids"]) == 14
     routes = selector.route_tests(config, result["test_ids"])
-    assert [len(g["files"]) for g in routes["groups"]] == [12, 12]
+    assert [len(g["files"]) for g in routes["groups"]] == [12, 13]
     assert routes["matrix"]["include"] == [
         {"group_id": b + "-0", "board": b, "nproc_per_node": 1}
         for b in ("ppu10", "ppu15")
@@ -74,6 +74,15 @@ def test_real_config_and_full_routes(selector, config):
         ),
         (["tests/e2e/fork_port/_tolerances.py"], "subset", ["gdn-decode"]),
         (["tests/e2e/test_native_activation.py"], "subset", ["activation"]),
+        (["tests/e2e/test_fp8_linear_dispatch.py"], "subset", ["fp8-linear"]),
+        (
+            ["vllm_sail/model_executor/kernels/linear/scaled_mm/ppu.py"],
+            "subset",
+            ["fp8-linear"],
+        ),
+        (["vllm_sail/registry/linear_kernels/__init__.py"], "full", None),
+        (["vllm_sail/utils/deep_gemm.py"], "full", None),
+        (["vllm_sail/patch/enhancement/fp8_quant.py"], "full", None),
         (
             ["vllm_sail/models/deepseek_v4/ops/indexer.py"],
             "subset",
@@ -189,6 +198,17 @@ def test_catalog_preflights_required_sdk_submodules(config):
         "gdn-prefill"
     ]
     assert {"pla.decode.kda", "pla.prefill.flashkdapro"} <= requirements["kda"]
+
+
+def test_fp8_linear_requires_deepgemm_on_ppu15(selector, config):
+    item = next(t for t in config["test_catalog"] if t["id"] == "fp8-linear")
+    assert item["boards"] == ["ppu15"]
+    assert "deep_gemm" in item["requires"]
+    assert item["board_overrides"] == {}
+    routes = selector.route_tests(config, ["fp8-linear"])
+    assert len(routes["groups"]) == 1
+    assert routes["groups"][0]["board"] == "ppu15"
+    assert routes["groups"][0]["files"] == ["tests/e2e/test_fp8_linear_dispatch.py"]
 
 
 def test_routing_rejects_unknown_ids(selector, config):

@@ -243,7 +243,7 @@ def test_nope_cache_layout_scales_and_negative_slots(stage, cache_kind):
     q = _randn(3, _NUM_HEADS, 192)
     kn = _randn(3, _NUM_HEADS, 128)
     kp, kv = _randn(3, 64), _randn(3, 512)
-    kv[:, :128] = 0  # zero tile: scale must stay positive (FLT_MIN).
+    kv[:, :128] = 0  # zero tile exercises the 1e-4 floor before power-of-two rounding.
     kv[:, 128:256] *= 100
     ql, qp, v = (
         _randn(3, _NUM_HEADS, 512),
@@ -312,7 +312,9 @@ def test_nope_cache_layout_scales_and_negative_slots(stage, cache_kind):
     active = rows[[3, 9]]
     if cache_kind == "fp8_ds_mla":
         tiles = kv.cpu().float()[1:].reshape(2, 4, 128)
-        scales = (tiles.abs().amax(-1) / 448).clamp_min(torch.finfo(torch.float32).tiny)
+        scales = torch.exp2(
+            torch.ceil(torch.log2((tiles.abs().amax(-1) / 448).clamp_min(1e-4)))
+        )
         actual_scales = active[:, 512:528].contiguous().view(torch.float32)
         torch.testing.assert_close(actual_scales, scales, rtol=1e-6, atol=0)
         expected_bytes = (

@@ -98,13 +98,13 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor q_weight, Tensor k_weight, Tensor cos_sin_cache, "
       "bool is_neox, Tensor position_ids, "
       "int forced_token_heads_per_warp=-1) -> ()");
-
   ops.def(
       "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert("
       "Tensor q_in, Tensor kv, Tensor! k_cache, "
       "Tensor slot_mapping, Tensor position_ids, Tensor cos_sin_cache, "
       "int q_head_padded, float eps, int cache_block_size, "
-      "bool apply_q_norm=True, bool kv_mxfp8=False) -> Tensor");
+      "bool apply_q_norm=True, bool kv_mxfp8=False, bool apply_q_rope=True, "
+      "bool is_q_interleaved=False) -> Tensor");
 
   // FlashInfer V4 full-cache variants: write Q in place (bf16) or to a separate
   // FP8 tensor, and KV into a contiguous 512-wide token-strided cache.
@@ -365,9 +365,6 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
 
   // DSV3 fused A GEMM: conditionally compiled so impl registration is in
   // source file (dsv3_fused_a_gemm.cu)
-
-  // AllSpark ops: conditionally compiled so impl registrations are in source
-  // files (allspark_repack.cu and allspark_qgemm_w8a16.cu)
 #endif
 
   // Layernorm kernels (shared CUDA/ROCm)

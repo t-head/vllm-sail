@@ -19,6 +19,11 @@
     },
     "source_to_tests": [
       {
+        "id": "fp8-linear-python",
+        "paths": ["vllm_sail/model_executor/kernels/linear/scaled_mm/ppu.py"],
+        "test_ids": ["fp8-linear"]
+      },
+      {
         "id": "deepseek-indexer-int8-python",
         "paths": ["vllm_sail/models/deepseek_v4/ops/indexer.py", "vllm_sail/patch/enhancement/models/deepseek_v4.py", "vllm_sail/patch/enhancement/models/deepseek_v4_compressor.py"],
         "test_ids": ["deepseek-indexer-int8"]
@@ -64,6 +69,7 @@
     {"id": "activation", "test": "tests/e2e/test_native_activation.py", "boards": ["ppu10", "ppu15"], "requires": ["torch", "triton", "vllm", "vllm_sail"], "board_overrides": {}},
     {"id": "deepseek-indexer-int8", "test": "tests/e2e/test_deepseek_v4_indexer_int8.py", "boards": ["ppu10"], "requires": ["torch", "triton", "vllm", "vllm_sail"], "board_overrides": {}},
     {"id": "deepseek-native", "test": "tests/e2e/test_deepseek_v4_native.py", "boards": ["ppu10", "ppu15"], "requires": ["torch", "triton", "vllm", "vllm_sail"], "board_overrides": {}},
+    {"id": "fp8-linear", "test": "tests/e2e/test_fp8_linear_dispatch.py", "boards": ["ppu15"], "requires": ["deep_gemm", "torch", "triton", "vllm", "vllm_sail"], "board_overrides": {}},
     {"id": "fork-quantization", "test": "tests/e2e/test_fork_quantization.py", "boards": ["ppu10", "ppu15"], "requires": ["torch", "triton", "vllm", "vllm_sail"], "board_overrides": {"test_fused_norm_matches_native_then_quantize": ["ppu15"]}},
     {"id": "gdn-decode", "test": "tests/e2e/fork_port/test_gdn_pla_decode.py", "boards": ["ppu10", "ppu15"], "requires": ["pla", "pla.decode", "torch", "triton", "vllm", "vllm_sail"], "board_overrides": {}},
     {"id": "gdn-prefill", "test": "tests/e2e/fork_port/test_gdn_pla_prefill.py", "boards": ["ppu10", "ppu15"], "requires": ["pla", "pla.prefill.flashqla", "pla.prefill.flashqla.ops", "torch", "triton", "vllm", "vllm_sail"], "board_overrides": {}},

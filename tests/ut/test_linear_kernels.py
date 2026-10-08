@@ -209,6 +209,81 @@ def test_int8_and_cutlass_can_implement_accept_every_config(kernels) -> None:
 
 
 @pytest.mark.parametrize(
+    ("activation_key", "weight_key", "expected"),
+    [
+        (
+            "kFp8DynamicTokenSym",
+            "kFp8StaticChannelSym",
+            "PPUDeepGemmFP8ScaledMMLinearKernel",
+        ),
+        (
+            "kFp8DynamicTokenSym",
+            "kFp8StaticTensorSym",
+            "PPUDeepGemmFP8ScaledMMLinearKernel",
+        ),
+        (
+            "kFp8DynamicTensorSym",
+            "kFp8StaticChannelSym",
+            "PPUDeepGemmFP8ScaledMMLinearKernel",
+        ),
+        (
+            "kFp8StaticTensorSym",
+            "kFp8StaticChannelSym",
+            "PPUDeepGemmFP8ScaledMMLinearKernel",
+        ),
+        (
+            "kFp8DynamicTensorSym",
+            "kFp8StaticTensorSym",
+            "PPUDeepGemmFP8ScaledMMLinearKernel",
+        ),
+        (
+            "kFp8StaticTensorSym",
+            "kFp8StaticTensorSym",
+            "PPUDeepGemmFP8ScaledMMLinearKernel",
+        ),
+    ],
+)
+def test_fp8_registry_selects_kernel_for_scale_granularity(
+    monkeypatch, kernels, activation_key, weight_key, expected
+) -> None:
+    """Tensor and channel scales use the PPU DeepGEMM adapter."""
+    import torch
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
+        FP8ScaledMMLinearLayerConfig,
+    )
+    from vllm.model_executor.layers.quantization.utils import quant_utils
+    from vllm.platforms import current_platform
+
+    from vllm_sail.model_executor.kernels.linear.scaled_mm import ppu as ppu_kernels
+
+    linear_module, _ = kernels
+    monkeypatch.setattr(type(current_platform), "is_ppu", lambda self: True)
+    monkeypatch.setattr(
+        type(current_platform), "is_device_capability", lambda self, cap: False
+    )
+    monkeypatch.setattr(ppu_kernels, "is_deep_gemm_supported", lambda: True)
+    monkeypatch.setattr(
+        ppu_kernels, "should_use_deepgemm_for_fp8_linear", lambda *args: True
+    )
+    config = FP8ScaledMMLinearLayerConfig(
+        activation_quant_key=getattr(quant_utils, activation_key),
+        weight_quant_key=getattr(quant_utils, weight_key),
+        input_dtype=torch.bfloat16,
+        out_dtype=torch.bfloat16,
+        weight_shape=(128, 256),
+    )
+    with set_current_vllm_config(VllmConfig()):
+        selected = linear_module.choose_scaled_mm_linear_kernel(
+            config,
+            linear_module._POSSIBLE_FP8_KERNELS,
+            compute_capability=89,
+            quantization="fp8_w8a8",
+        )
+    assert selected.__name__ == expected
+
+
+@pytest.mark.parametrize(
     "class_name",
     ["PPUCutlassFp8BlockScaledMMKernel", "PPUDeepGemmFp8BlockScaledMMKernel"],
 )

@@ -181,7 +181,7 @@ git -C "${VLLM_SRC}" checkout --detach FETCH_HEAD
         # shellcheck disable=SC1091
         source "${CARGO_HOME:-$HOME/.cargo}/env"
     fi
-    # Follow the checked-out source, currently Rust 1.95 for vLLM v0.30.0.
+    # Follow the Rust toolchain pinned by the checked-out vLLM source.
     RUSTUP_TOOLCHAIN="$(python - <<'PY'
 import tomllib
 from pathlib import Path
@@ -193,7 +193,7 @@ PY
     rustup toolchain install "${RUSTUP_TOOLCHAIN}" --profile minimal
     rustc --version | tee "${LOG_DIR}/rustc-version.log"
     cargo --version | tee "${LOG_DIR}/cargo-version.log"
-    python use_existing_torch.py
+    python tools/use_existing_torch.py
     python -m pip install -r requirements/build/cuda.txt
     export VLLM_TARGET_DEVICE=empty VLLM_REQUIRE_RUST_FRONTEND=1
     export MAX_JOBS="${BUILD_JOBS}" CARGO_BUILD_JOBS="${BUILD_JOBS}"

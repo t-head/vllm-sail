@@ -275,7 +275,7 @@ def valid_inputs(runner, tmp_path):
 
 def test_inputs_verify_real_wheel_archives(runner, valid_inputs):
     raw, _, config, _, manifest = runner.read_inputs(valid_inputs)
-    assert len(json.loads(raw)["files"]) == len(config["test_catalog"]) == 13
+    assert len(json.loads(raw)["files"]) == len(config["test_catalog"]) == 14
     assert len(manifest["wheels"]) == 2
 
 
@@ -361,7 +361,7 @@ def test_selection_cli_with_verified_wheels(runner, valid_inputs, tmp_path):
         env={**os.environ, "GITHUB_OUTPUT": str(github_output)},
     )
     assert result.returncode == 0, result.stderr
-    assert len(json.loads(output.read_bytes())["files"]) == 13
+    assert len(json.loads(output.read_bytes())["files"]) == 14
     assert "has_tests=true" in github_output.read_text()
 
 
