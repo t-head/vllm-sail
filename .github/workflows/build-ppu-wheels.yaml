@@ -10,10 +10,24 @@ on:
         default: ""
         type: string
       build_image:
-        description: Build container image
-        required: true
-        default: reg.docker.alibaba-inc.com/ai-tmp/llm:pytorch2.13.0-ubuntu24.04-cuda13.0-vllm0.27.0-py312-ppu202609111952
+        description: 设备验证构建镜像完整 digest；空值使用批准基线
+        required: false
+        default: ""
         type: string
+      device_image:
+        description: 设备运行镜像完整 digest；空值使用批准基线
+        required: false
+        default: ""
+        type: string
+      device_test_scope:
+        description: 首阶段手动入口始终 full，auto 留待资格验证后启用
+        default: full
+        type: choice
+        options: [auto, full]
+      qualification_mode:
+        description: 收集双板型候选资格证据，不自动批准
+        default: false
+        type: boolean
       sdk_url:
         description: SAIL SDK installer URL
         required: true
@@ -40,12 +54,12 @@ permissions:
   actions: read
 
 concurrency:
-  group: ppu-ci-${{ github.event.pull_request.number || github.ref }}
+  group: ppu-ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   build:
-    if: inputs.existing_build_run_id == ''
+    if: inputs.existing_build_run_id == '' && github.event_name != 'workflow_dispatch'
     name: PPU wheel build
     runs-on: k8s-runner-group-cpu-thead
     timeout-minutes: 180
@@ -105,6 +119,153 @@ jobs:
             artifacts/build-manifest.txt
           if-no-files-found: warn
           retention-days: 14
+
+  # 未完成双板型资格验证前，这条新链路只接受手动运行。
+  detect-device-changes:
+    if: github.event_name == 'workflow_dispatch' && inputs.existing_build_run_id == ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      build_image: ${{ steps.detect.outputs.build_image }}
+      runtime_image: ${{ steps.detect.outputs.runtime_image }}
+      expected_vllm_commit: ${{ steps.detect.outputs.expected_vllm_commit }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - name: 固定手动验证身份与镜像
+        id: detect
+        env:
+          BUILD_IMAGE_OVERRIDE: ${{ inputs.build_image }}
+          DEVICE_IMAGE_OVERRIDE: ${{ inputs.device_image }}
+          VLLM_REF_OVERRIDE: ${{ inputs.vllm_ref }}
+          QUALIFICATION_MODE: ${{ inputs.qualification_mode }}
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          from scripts.ci.ppu_device_select import (
+              validate_config, validate_environment, resolve_build_image,
+              digest_image, sha, require, github_outputs, collect_changes, write_json,
+          )
+          root = Path.cwd()
+          environment = json.loads(Path('scripts/ci/ppu_device_environment.json').read_bytes())
+          validate_config(json.loads(Path('scripts/ci/ppu_device_tests.json').read_bytes()), root)
+          qualified = validate_environment(environment)
+          require(qualified or os.environ['QUALIFICATION_MODE'] == 'true', '初次基线必须开启 qualification_mode')
+          image = resolve_build_image(environment, os.environ['BUILD_IMAGE_OVERRIDE'])
+          runtime = digest_image(os.environ['DEVICE_IMAGE_OVERRIDE'] or environment['runtime_image'])
+          expected = sha(os.environ['VLLM_REF_OVERRIDE'] or Path('.github/vllm-main-verified.commit').read_text().strip())
+          github_outputs(dict(build_image=image, runtime_image=runtime, expected_vllm_commit=expected))
+          write_json('changes.json', collect_changes(root, None, None, os.environ['GITHUB_SHA']))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ppu-device-changes-${{ github.run_id }}-${{ github.run_attempt }}
+          path: changes.json
+          if-no-files-found: error
+          retention-days: 14
+
+  device-build:
+    needs: detect-device-changes
+    runs-on: k8s-runner-group-cpu-thead
+    timeout-minutes: 180
+    container:
+      image: ${{ needs.detect-device-changes.outputs.build_image }}
+    env:
+      GIT_CONFIG_NOSYSTEM: "1"
+      GIT_CONFIG_GLOBAL: /dev/null
+      VLLM_SAIL_BUILD_IMAGE: ${{ needs.detect-device-changes.outputs.build_image }}
+      SDK_URL: ${{ inputs.sdk_url }}
+      TORCH_URL: ${{ inputs.torch_url }}
+      VLLM_REF: ${{ needs.detect-device-changes.outputs.expected_vllm_commit }}
+      PYTORCH_SAIL_ARCH: ${{ inputs.pytorch_sail_arch }}
+      ARTIFACT_DIR: ${{ github.workspace }}/artifacts
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - name: 构建本次正式 wheel
+        run: bash scripts/ci/build_ppu_wheels.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ppu-wheels-${{ github.run_id }}
+          path: artifacts/wheels/
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ppu-build-diagnostics-${{ github.run_id }}
+          path: |
+            artifacts/logs/**
+            artifacts/build-manifest.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  select-device-tests:
+    needs: [detect-device-changes, device-build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      mode: ${{ steps.select.outputs.mode }}
+      matrix: ${{ steps.select.outputs.matrix }}
+      has_tests: ${{ steps.select.outputs.has_tests }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: ppu-device-changes-${{ github.run_id }}-${{ github.run_attempt }}
+          path: device-selection
+      - uses: actions/download-artifact@v4
+        with:
+          name: ppu-wheels-${{ github.run_id }}
+          path: device-wheels
+      - uses: actions/download-artifact@v4
+        with:
+          name: ppu-build-diagnostics-${{ github.run_id }}
+          path: device-build-diagnostics
+      - name: 校验产物并生成 full 清单
+        id: select
+        env:
+          BUILD_IMAGE: ${{ needs.detect-device-changes.outputs.build_image }}
+          RUNTIME_IMAGE: ${{ needs.detect-device-changes.outputs.runtime_image }}
+          EXPECTED_VLLM_COMMIT: ${{ needs.detect-device-changes.outputs.expected_vllm_commit }}
+        run: |
+          cp scripts/ci/ppu_device_tests.json scripts/ci/ppu_device_environment.json device-selection/
+          python scripts/ci/ppu_device_select.py select --repo . \
+            --config device-selection/ppu_device_tests.json --environment device-selection/ppu_device_environment.json \
+            --changes device-selection/changes.json --build-manifest device-build-diagnostics/build-manifest.txt \
+            --wheel-manifest device-wheels/wheel-manifest.json --build-run-id "$GITHUB_RUN_ID" \
+            --build-image "$BUILD_IMAGE" --runtime-image "$RUNTIME_IMAGE" \
+            --expected-vllm-commit "$EXPECTED_VLLM_COMMIT" --scope full --output device-selection/selection.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ppu-device-selection-${{ github.run_id }}-${{ github.run_attempt }}
+          path: device-selection/
+          if-no-files-found: error
+          retention-days: 14
+
+  device-tests:
+    needs: [detect-device-changes, select-device-tests]
+    if: needs.select-device-tests.outputs.has_tests == 'true'
+    uses: ./.github/workflows/ppu-device-tests.yaml
+    permissions:
+      contents: read
+      actions: read
+    with:
+      build_run_id: ${{ github.run_id }}
+      tested_sha: ${{ github.sha }}
+      matrix: ${{ needs.select-device-tests.outputs.matrix }}
+      selection_artifact: ppu-device-selection-${{ github.run_id }}-${{ github.run_attempt }}
+      build_image: ${{ needs.detect-device-changes.outputs.build_image }}
+      expected_vllm_commit: ${{ needs.detect-device-changes.outputs.expected_vllm_commit }}
+      image: ${{ needs.detect-device-changes.outputs.runtime_image }}
+      qualification_mode: ${{ inputs.qualification_mode }}
 
   pin-unit-tests:
     name: PPU pin UT

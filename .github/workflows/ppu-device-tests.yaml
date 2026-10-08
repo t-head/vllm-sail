@@ -1,0 +1,171 @@
+name: PPU device tests
+
+on:
+  workflow_call:
+    inputs:
+      build_run_id:
+        type: string
+        required: true
+      tested_sha:
+        type: string
+        required: true
+      matrix:
+        type: string
+        required: true
+      selection_artifact:
+        type: string
+        required: true
+      build_image:
+        type: string
+        required: true
+      expected_vllm_commit:
+        type: string
+        required: true
+      image:
+        type: string
+        required: true
+      qualification_mode:
+        type: boolean
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  GIT_CONFIG_NOSYSTEM: "1"
+  GIT_CONFIG_GLOBAL: /dev/null
+  WHEELS_DIR: /tmp/device-wheels
+  BUILD_MANIFEST_FILE: /tmp/device-build/build-manifest.txt
+  SELECTION_FILE: /tmp/device-selection/selection.json
+  EXPECTED_SAIL_COMMIT: ${{ inputs.tested_sha }}
+  EXPECTED_VLLM_COMMIT: ${{ inputs.expected_vllm_commit }}
+  EXPECTED_BUILD_RUN_ID: ${{ inputs.build_run_id }}
+  EXPECTED_BUILD_IMAGE: ${{ inputs.build_image }}
+  CI_RUN_ID: ${{ github.run_id }}
+  CI_RUN_ATTEMPT: ${{ github.run_attempt }}
+  RUNTIME_IMAGE: ${{ inputs.image }}
+  QUALIFICATION_MODE: ${{ inputs.qualification_mode }}
+  DISPATCH_MATRIX: ${{ inputs.matrix }}
+
+jobs:
+  device-tests:
+    runs-on: k8s-runner-group-cpu-thead
+    timeout-minutes: 90
+    container:
+      image: ${{ inputs.image }}
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix: ${{ fromJSON(inputs.matrix) }}
+    env:
+      DEVICE_BOARD: ${{ matrix.board }}
+      DEVICE_GROUP_ID: ${{ matrix.group_id }}
+      DEVICE_RESULTS_DIR: /mnt/wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/device-tests/${{ matrix.group_id }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tested_sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: ppu-wheels-${{ inputs.build_run_id }}
+          path: /tmp/device-wheels
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: ppu-build-diagnostics-${{ inputs.build_run_id }}
+          path: /tmp/device-build
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.selection_artifact }}
+          path: /tmp/device-selection
+      - name: 校验完整输入、路由与 NAS
+        id: prepare
+        run: python scripts/ci/ppu_device_runner.py prepare
+      - name: 在新建单卡容器运行设备组
+        id: scheduler
+        uses: t-head/ppu-scheduler-action@a4e03cbbdb2624f4871fff30d7081b34cbc4b7d4
+        with:
+          image: ${{ inputs.image }}
+          nnodes: 0
+          nproc_per_node: 1
+          namespace: ppu-sched
+          node_selector: ${{ steps.prepare.outputs.node_selector }}
+          timeout_minutes: 60
+          cleanup_policy: always
+          job_suffix: dev-${{ matrix.group_id }}
+          source_dir: /workspace/source
+          artifact_paths: |
+            /tmp/device-wheels
+            /tmp/device-build
+            /tmp/device-selection
+          extra_env: WHEELS_DIR=/workspace/source/device-wheels,BUILD_MANIFEST_FILE=/workspace/source/device-build/build-manifest.txt,SELECTION_FILE=/workspace/source/device-selection/selection.json,DEVICE_RESULTS_DIR=/mnt/wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/device-tests/${{ matrix.group_id }},DEVICE_BOARD=${{ matrix.board }},DEVICE_GROUP_ID=${{ matrix.group_id }},EXPECTED_SAIL_COMMIT=${{ inputs.tested_sha }},EXPECTED_VLLM_COMMIT=${{ inputs.expected_vllm_commit }},EXPECTED_BUILD_RUN_ID=${{ inputs.build_run_id }},EXPECTED_BUILD_IMAGE=${{ inputs.build_image }},CI_RUN_ID=${{ github.run_id }},CI_RUN_ATTEMPT=${{ github.run_attempt }},RUNTIME_IMAGE=${{ inputs.image }},QUALIFICATION_MODE=${{ inputs.qualification_mode }}
+          container_options: |
+            privileged: true
+            host_ipc: true
+            host_network: true
+            shm_size: 8Gi
+          command: cd /workspace/source && bash scripts/ci/ppu_device_test.sh
+      - name: 校验 NAS 回传并补充控制面计时
+        if: always()
+        env:
+          SCHEDULER_DURATION: ${{ steps.scheduler.outputs.duration_seconds }}
+          SCHEDULER_STATUS: ${{ steps.scheduler.outputs.job_status }}
+        run: |
+          python -m pip install -r requirements/dev.txt
+          python scripts/ci/ppu_device_runner.py finish
+      - name: 上传当前组完整证据
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ppu-device-results-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.group_id }}
+          path: /wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/device-tests/${{ matrix.group_id }}/
+          if-no-files-found: error
+          retention-days: 14
+
+  device-summary:
+    needs: device-tests
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DEVICE_BOARD: ${{ fromJSON(inputs.matrix).include[0].board }}
+      DEVICE_GROUP_ID: ${{ fromJSON(inputs.matrix).include[0].group_id }}
+      DEVICE_RESULTS_DIR: /mnt/wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/device-tests/${{ fromJSON(inputs.matrix).include[0].group_id }}
+      DEVICE_JOB_RESULT: ${{ needs.device-tests.result }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tested_sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.selection_artifact }}
+          path: /tmp/device-selection
+      - uses: actions/download-artifact@v4
+        with:
+          name: ppu-wheels-${{ inputs.build_run_id }}
+          path: /tmp/device-wheels
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: ppu-build-diagnostics-${{ inputs.build_run_id }}
+          path: /tmp/device-build
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ppu-device-results-${{ github.run_id }}-${{ github.run_attempt }}-*
+          path: device-results
+          merge-multiple: false
+      - name: 逐组逐文件核验 artifact
+        run: |
+          python -m pip install -r requirements/dev.txt
+          python scripts/ci/ppu_device_runner.py summary --results device-results
+          test "$DEVICE_JOB_RESULT" = success

@@ -102,7 +102,17 @@ def installed(monkeypatch, patch_utils_module):
 def test_ppu10_query_bypasses_unsupported_fp8_kernel(installed, consumer):
     _, modules, calls, _ = installed
     assert modules[consumer].fused_indexer_q_rope_quant(*range(6)) == "int8_q"
-    assert calls[-1][2] == {}
+    assert calls[-1][2] == {"output_buffers": None}
+
+
+@pytest.mark.parametrize("buffers", [None, (object(), object())])
+def test_attention_alias_forwards_int8_output_buffers(installed, buffers):
+    _, modules, calls, _ = installed
+    modules[f"{BASE}.attention"].fused_indexer_q_rope_quant(
+        *range(6), output_buffers=buffers
+    )
+    assert calls[-1][0] == "int8_q"
+    assert calls[-1][2]["output_buffers"] is buffers
 
 
 @pytest.mark.parametrize(

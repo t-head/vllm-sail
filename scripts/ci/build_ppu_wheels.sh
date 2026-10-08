@@ -107,6 +107,7 @@ TORCH_ARCHIVE="${WORK_DIR}/$(url_basename "${TORCH_URL}")"
     printf 'status=running\n'
     printf 'vllm_ref=%s\n' "${VLLM_REF}"
     printf 'pytorch_sail_arch=%s\n' "${PYTORCH_SAIL_ARCH}"
+    printf 'build_image=%s\n' "${VLLM_SAIL_BUILD_IMAGE:-}"
     printf 'sdk_file=%s\n' "$(basename "${SDK_INSTALLER}")"
     printf 'torch_file=%s\n' "$(basename "${TORCH_ARCHIVE}")"
 } >>"${MANIFEST}"

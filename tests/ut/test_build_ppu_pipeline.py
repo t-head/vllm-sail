@@ -41,6 +41,7 @@ def test_build_script_preserves_required_build_contract() -> None:
         "ppu_wheel_manifest.py",
         "VERBOSE=1",
         "build-manifest.txt",
+        "printf 'build_image=%s\\n' \"${VLLM_SAIL_BUILD_IMAGE:-}\"",
     )
     for marker in required:
         assert marker in text
@@ -83,8 +84,32 @@ def test_build_workflow_supports_prs_and_manual_runs_on_cpu_runner() -> None:
 def test_build_workflow_uses_script_and_retains_artifacts() -> None:
     text = WORKFLOW.read_text()
     assert "bash scripts/ci/build_ppu_wheels.sh" in text
-    assert text.count("actions/upload-artifact@v4") == 2
-    assert text.count("retention-days: 14") == 2
+    import yaml
+
+    jobs = yaml.safe_load(text)["jobs"]
+    for job in ("build", "device-build"):
+        uploads = {
+            step["with"]["name"]: step["with"]
+            for step in jobs[job]["steps"]
+            if step.get("uses") == "actions/upload-artifact@v4"
+        }
+        assert set(uploads) == {
+            "ppu-wheels-${{ github.run_id }}",
+            "ppu-build-diagnostics-${{ github.run_id }}",
+        }
+        assert all(config["retention-days"] == 14 for config in uploads.values())
+        assert (
+            uploads["ppu-wheels-${{ github.run_id }}"]["if-no-files-found"] == "error"
+        )
+    for job, name in (
+        ("detect-device-changes", "changes"),
+        ("select-device-tests", "selection"),
+    ):
+        assert any(
+            step.get("with", {}).get("name")
+            == f"ppu-device-{name}-${{{{ github.run_id }}}}-${{{{ github.run_attempt }}}}"
+            for step in jobs[job]["steps"]
+        )
     assert "if-no-files-found: error" in text
     assert "if-no-files-found: warn" in text
     assert "if: always()" in text
