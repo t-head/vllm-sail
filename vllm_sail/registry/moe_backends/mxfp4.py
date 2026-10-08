@@ -169,8 +169,7 @@ def select_mxfp4_moe_backend(
     config: FusedMoEConfig,
     activation_key: QuantKey | None = None,
 ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts] | None]:
-    """
-    Select the primary MXFP4 MoE backend.
+    """Select the primary MXFP4 MoE backend.
 
     Args:
         config: MoE configuration
@@ -179,6 +178,7 @@ def select_mxfp4_moe_backend(
             Use kFp8StaticTensorSym for W4A8 scheme.
 
     Note: Shape-specific fallbacks may still occur at runtime.
+
     """
     runner_backend = config.moe_backend
     requested_activation_key = _resolve_activation_key(activation_key)
@@ -319,7 +319,7 @@ _upstream_select_deepseek_v4 = oracle.select_deepseek_v4_mxfp4_moe_backend
 @patch(
     _MODULE,
     "select_deepseek_v4_mxfp4_moe_backend",
-    reason="Preserve PPU W4A4/W4A16 selection through the 0.30 MXFP4 kernel factory.",
+    reason="Preserve PPU W4A4/W4A16 selection through the 0.31 MXFP4 kernel factory.",
     affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )

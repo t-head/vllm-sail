@@ -1061,18 +1061,40 @@ def apply(
     )
     intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
 
+    # Under EP, drop the top-k slots routed to remote experts at alignment
+    # time instead of launching `off_experts == -1` GEMM blocks that only
+    # write zeros; the pad-aware `moe_sum` below skips the same slots.
+    # Their rows in the workspace caches are then never written, so every
+    # consumer of those caches must be row-local: a dynamic per-tensor
+    # scale for the second GEMM's activation would take its amax over the
+    # untouched rows, and LoRA aligns the full `topk_ids` itself.
+    a2_scale_is_global = (
+        self.quant_dtype is not None
+        and a2_scale is None
+        and self.block_shape is None
+        and (not self.per_act_token_quant or self.quantization_emulation)
+    )
+    skip_invalid = (
+        expert_map is not None
+        and self._lora_context is None
+        and not a2_scale_is_global
+    )
+
     # Include fused shared-expert rows while preserving EP remapping.
     num_align_experts = w1.shape[0] if expert_map is None else global_num_experts
-    sorted_token_ids, expert_ids, num_tokens_post_padded = _prepare_expert_assignment(
-        topk_ids,
-        config,
-        num_tokens,
-        top_k_num,
-        num_align_experts,
-        expert_map,
-        use_int8_w8a16=self.quant_config.use_int8_w8a16,
-        use_int4_w4a16=self.quant_config.use_int4_w4a16,
-        block_shape=self.block_shape,
+    sorted_token_ids, expert_ids, num_tokens_post_padded = (
+        _prepare_expert_assignment(
+            topk_ids,
+            config,
+            num_tokens,
+            top_k_num,
+            num_align_experts,
+            expert_map,
+            use_int8_w8a16=self.quant_config.use_int8_w8a16,
+            use_int4_w4a16=self.quant_config.use_int4_w4a16,
+            block_shape=self.block_shape,
+            ignore_invalid_experts=skip_invalid,
+        )
     )
 
     # LoRA w13: applied to intermediate_cache1 before activation. When
@@ -1206,8 +1228,11 @@ def apply(
     # Fuse SiLU+Mul + FP8 block quantize into a single kernel
     # when conditions permit (gated SiLU, fp8 block quant with
     # group_size=128, no LoRA requiring the BF16 intermediate).
+    # The fused kernel has no clamp parameter, so a configured
+    # SwiGLU clamp limit falls through to the unfused path.
     if (
         activation == MoEActivation.SILU
+        and self.activation_config.clamp_limit is None
         and self.quant_config.use_fp8_w8a8
         and self.block_shape == [128, 128]
         and lora_context is None
@@ -1314,7 +1339,7 @@ def apply(
             )
 
     # separate function is required for MoE + LoRA
-    self.moe_sum(intermediate_cache3, output)
+    self.moe_sum(intermediate_cache3, output, topk_ids, expert_map)
 
 
 _install(_experts, "apply", apply, target_name="TritonExperts.apply")

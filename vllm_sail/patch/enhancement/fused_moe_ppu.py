@@ -293,16 +293,26 @@ def install() -> None:
         affected_versions=AFFECTED_VERSIONS,
         remove_when=REMOVE_WHEN_MOE_SUM,
     )
-    def _moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
+    def _moe_sum(
+        self,
+        input: torch.Tensor,
+        output: torch.Tensor,
+        topk_ids: torch.Tensor | None = None,
+        expert_map: torch.Tensor | None = None,
+    ) -> None:
         from vllm.platforms import current_platform
 
-        if current_platform.is_ppu() and input.shape[0] > 1024:
+        if (
+            current_platform.is_ppu()
+            and input.shape[0] > 1024
+            and expert_map is None
+        ):
             from vllm_sail.model_executor.layers.fused_moe.triton_kernels import (
                 moe_sum_reduce_triton,
             )
 
             moe_sum_reduce_triton(input, output)
             return
-        _upstream_moe_sum(self, input, output)
+        _upstream_moe_sum(self, input, output, topk_ids, expert_map)
 
     _installed = True

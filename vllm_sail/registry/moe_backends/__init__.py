@@ -14,7 +14,7 @@ _REMOVE_WHEN = (
     "capturing module-level aliases before plugin registration."
 )
 
-# Module-scope consumers captured before plugin registration in vLLM 0.30.
+# Module-scope consumers captured before plugin registration in vLLM 0.31.
 _ORACLE_ALIAS_CONSUMERS = {
     "unquantized": {
         "select_unquantized_moe_backend": (
@@ -106,25 +106,28 @@ _ORACLE_ALIAS_CONSUMERS = {
             "vllm.model_executor.layers.quantization.auto_gptq",
             "vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16",
             "vllm.model_executor.layers.quantization.moe_wna16",
+            "vllm.model_executor.layers.quantization.quark.quark_moe",
         ),
         "make_wna16_moe_kernel": (
             "vllm.model_executor.layers.quantization.auto_awq",
             "vllm.model_executor.layers.quantization.auto_gptq",
             "vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16",
             "vllm.model_executor.layers.quantization.moe_wna16",
+            "vllm.model_executor.layers.quantization.quark.quark_moe",
         ),
         "convert_to_wna16_moe_kernel_format": (
             "vllm.model_executor.layers.quantization.auto_awq",
             "vllm.model_executor.layers.quantization.auto_gptq",
             "vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16",
             "vllm.model_executor.layers.quantization.moe_wna16",
+            "vllm.model_executor.layers.quantization.quark.quark_moe",
         ),
     },
 }
 
 
 def _rebind_loaded_oracle_aliases(backend_modules: dict[str, object]) -> None:
-    """Update vLLM 0.30 consumers that captured patched oracle functions."""
+    """Update vLLM 0.31 consumers that captured patched oracle functions."""
     import importlib
     import sys
 
@@ -155,14 +158,14 @@ def _rebind_loaded_oracle_aliases(backend_modules: dict[str, object]) -> None:
                 if upstream is None or captured is not upstream:
                     raise RuntimeError(
                         f"{consumer_name}.{alias_name} is not the expected "
-                        "vLLM 0.30 oracle alias"
+                        "vLLM 0.31 oracle alias"
                     )
 
                 patch(
                     consumer_name,
                     alias_name,
                     reason=(
-                        "vLLM 0.30 captured this MoE oracle function before "
+                        "vLLM 0.31 captured this MoE oracle function before "
                         "PPU registration, so the consumer would bypass PPU "
                         "DeepGEMM selection or preparation."
                     ),
