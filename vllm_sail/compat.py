@@ -6,7 +6,7 @@
 :func:`vllm_version_is` from a hot path — vllm-ascend has 28 such call sites
 inside its model runner and attention code and calls it out as a mistake.
 
-The plugin targets the vLLM 0.30 release line. The exact rebased source is
+The plugin targets the vLLM 0.31 release line. The exact rebased source is
 pinned in ``.github/vllm-release-tag.commit`` and
 ``.github/vllm-main-verified.commit``; the native corpus pins the same release
 in ``csrc/upstream/manifest.toml``.
@@ -21,8 +21,8 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 #: Inclusive lower bound / exclusive upper bound of the supported vLLM range.
-MIN_VLLM_VERSION = "0.30.0"
-MAX_VLLM_VERSION_EXCLUSIVE = "0.31.0"
+MIN_VLLM_VERSION = "0.31.0"
+MAX_VLLM_VERSION_EXCLUSIVE = "0.32.0"
 
 _checked = False
 

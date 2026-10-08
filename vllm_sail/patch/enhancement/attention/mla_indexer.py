@@ -43,7 +43,7 @@ import vllm_sail.utils.deep_gemm as _ppu_deep_gemm
 from vllm_sail.patch.bodies import bind_body
 from vllm_sail.patch.utils import patch, patch_value
 
-_AFFECTED = ">=0.30.0,<0.31.0"
+_AFFECTED = ">=0.31.0,<0.32.0"
 _MODULE = "vllm.v1.attention.backends.mla.indexer"
 
 
