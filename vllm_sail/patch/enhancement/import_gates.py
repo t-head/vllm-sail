@@ -63,11 +63,18 @@ _CONSUMERS = {
         "vllm.models.deepseek_v4.common.ops.cache_utils",
         "vllm.models.deepseek_v4.common.ops.fused_indexer_q",
         "vllm.model_executor.layers.sparse_attn_indexer",
+        "vllm.models.deepseek_v41.common.ops.cache_utils",
     ),
     "has_humming": (
         "vllm.model_executor.kernels.linear.mixed_precision.humming",
+        "vllm.model_executor.kernels.linear.mxfp4.humming",
+        "vllm.model_executor.kernels.linear.mxfp6.humming",
+        "vllm.model_executor.kernels.linear.mxfp8.humming",
+        "vllm.model_executor.kernels.linear.nvfp4.humming",
+        "vllm.model_executor.kernels.linear.scaled_mm.humming",
         "vllm.model_executor.layers.fused_moe.experts.fused_humming_moe",
-        "vllm.model_executor.layers.quantization.utils.humming_utils",
+        "vllm.model_executor.layers.quantization.utils.humming.moe",
+        "vllm.model_executor.layers.quantization.utils.humming.schema",
     ),
 }
 

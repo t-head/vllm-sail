@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import sys
 import types
@@ -11,6 +12,50 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).parents[2]
+
+
+@pytest.mark.upstream_source
+@pytest.mark.parametrize(
+    "patch_file,inventory_name,provider",
+    [
+        ("import_gates.py", "_CONSUMERS", "vllm.utils.import_utils"),
+        (
+            "attention/flashmla_ops.py",
+            "_FLASHMLA_ALIAS_CONSUMERS",
+            "vllm.v1.attention.ops.flashmla",
+        ),
+    ],
+)
+def test_optional_gate_consumer_inventory_matches_upstream(
+    upstream_source_root, patch_file, inventory_name, provider
+):
+    tree = ast.parse((ROOT / "vllm_sail/patch/enhancement" / patch_file).read_text())
+    inventory = next(
+        ast.literal_eval(node.value)
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == inventory_name
+            for target in node.targets
+        )
+    )
+    discovered = {name: set() for name in inventory}
+    source = upstream_source_root / "vllm"
+    for path in source.rglob("*.py"):
+        parts = path.relative_to(source).with_suffix("").parts
+        module = ".".join(("vllm", *(parts[:-1] if parts[-1] == "__init__" else parts)))
+        pending = list(ast.parse(path.read_text()).body)
+        while pending:
+            node = pending.pop()
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+                continue
+            if isinstance(node, ast.ImportFrom) and node.module == provider:
+                for alias in node.names:
+                    if alias.name in discovered:
+                        assert alias.asname is None, "renamed alias needs rebinding"
+                        discovered[alias.name].add(module)
+            pending.extend(ast.iter_child_nodes(node))
+    assert discovered == {name: set(consumers) for name, consumers in inventory.items()}
 
 
 @pytest.fixture
@@ -71,7 +116,7 @@ def test_optional_gates_rebind_preloaded_and_future_consumers(modules):
     provider = modules("vllm.utils.import_utils", has_cutedsl=probe, has_humming=probe)
     cute = modules("vllm.models.deepseek_v4.common.ops.cache_utils", has_cutedsl=probe)
     humming = modules(
-        "vllm.model_executor.layers.quantization.utils.humming_utils", has_humming=probe
+        "vllm.model_executor.layers.quantization.utils.humming.moe", has_humming=probe
     )
     patched = load_patch("vllm_sail/patch/enhancement/import_gates.py")
     assert cute.has_cutedsl is provider.has_cutedsl
