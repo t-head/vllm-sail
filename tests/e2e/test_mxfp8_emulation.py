@@ -41,7 +41,9 @@ def test_mxfp8_32x32_scale_loading_and_dense_output(
         lambda param, loaded: param.copy_(loaded), CkptCtx(scale_block_size=(32, 32))
     )
     loader(layer.weight_scale, checkpoint_scales.to("cuda"))
-    kernel = PPUEmulationMxfp8LinearKernel(Mxfp8LinearLayerConfig())
+    kernel = PPUEmulationMxfp8LinearKernel(
+        Mxfp8LinearLayerConfig(weight_shape=(64, input_size))
+    )
     kernel.process_weights_after_loading(layer)
     assert layer.weight.shape == (64, input_size)
     assert layer.weight_scale.shape == (64, input_size // 32)

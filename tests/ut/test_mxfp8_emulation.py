@@ -136,7 +136,9 @@ def test_upstream_selection_preserves_dense_bmm_and_cuda_paths(
         "init_mxfp8_linear_kernel",
     ):
         function(path, name, namespace)
-    selected = namespace["init_mxfp8_linear_kernel"](bmm_batch_size=bmm_batch_size)
+    selected = namespace["init_mxfp8_linear_kernel"](
+        weight_shape=(64, 576), bmm_batch_size=bmm_batch_size
+    )
     if bmm_batch_size is not None:
         expected = Emulation if is_ppu or backend == "emulation" else native_bmm
     elif is_ppu:
@@ -145,6 +147,7 @@ def test_upstream_selection_preserves_dense_bmm_and_cuda_paths(
         expected = Emulation if backend == "emulation" else NativeDense
     assert type(selected) is expected
     assert selected.config.bmm_batch_size == bmm_batch_size
+    assert selected.config.weight_shape == (64, 576)
 
 
 class Tensor:
