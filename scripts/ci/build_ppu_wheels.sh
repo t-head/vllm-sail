@@ -181,6 +181,8 @@ git -C "${VLLM_SRC}" checkout --detach FETCH_HEAD
         # shellcheck disable=SC1091
         source "${CARGO_HOME:-$HOME/.cargo}/env"
     fi
+    # Cargo 的 Git 依赖获取复用 Git CLI，遵循作业的 Git 配置隔离。
+    export CARGO_NET_GIT_FETCH_WITH_CLI=true
     # Follow the Rust toolchain pinned by the checked-out vLLM source.
     RUSTUP_TOOLCHAIN="$(python - <<'PY'
 import tomllib
