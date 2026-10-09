@@ -154,6 +154,32 @@ def test_e2e_workflow_is_reusable_and_manual_and_uses_cpu_runner() -> None:
     assert "actions: read" in text
 
 
+def test_manual_device_probe_is_separate_from_model_and_qualification() -> None:
+    text = WORKFLOW.read_text()
+    assert "device_probe_only:" in text
+    prepare = text.split("  prepare:", 1)[1].split("  e2e:", 1)[0]
+    assert "if: ${{ !inputs.device_probe_only }}" in prepare
+    assert "  device-probe:" in text
+    probe = text.split("  device-probe:", 1)[1]
+    assert (
+        "github.event_name == 'workflow_dispatch' && inputs.device_probe_only" in probe
+    )
+    assert (
+        "t-head/ppu-scheduler-action@a4e03cbbdb2624f4871fff30d7081b34cbc4b7d4" in probe
+    )
+    assert "nproc_per_node: 1" in probe and "fail-fast: false" in probe
+    assert "board: ppu10" in probe and "board: ppu15" in probe
+    assert "ppu-device-selection-${{ inputs.build_run_id }}" in probe
+    assert "PROBE_CODE_SHA: ${{ github.sha }}" in probe
+    assert "EXPECTED_SAIL_COMMIT: ${{ inputs.probe_sail_commit }}" in probe
+    assert "ppu_device_probe.py run" in probe
+    assert probe.index("ppu_device_probe.py watch") < probe.index(
+        "uses: t-head/ppu-scheduler-action"
+    )
+    assert "if: always()" in probe and "actions/upload-artifact@v4" in probe
+    assert "ppu_e2e_smoke.sh" not in probe and "ppu_device_runner.py run" not in probe
+
+
 def test_e2e_workflow_pulls_wheels_by_run_id() -> None:
     text = WORKFLOW.read_text()
     assert "build_run_id:" in text

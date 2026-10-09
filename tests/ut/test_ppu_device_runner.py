@@ -24,6 +24,73 @@ def runner():
     return load(RUNNER)
 
 
+@pytest.mark.parametrize(
+    "available,count",
+    [(False, 0), (False, 2), (True, 1), (True, 16), ("error", 1), (True, "error")],
+)
+def test_device_observation_keeps_independent_results(available, count):
+    from types import SimpleNamespace
+
+    calls = []
+
+    def query(name, value):
+        calls.append(name)
+        if value == "error":
+            raise RuntimeError(name)
+        return value
+
+    torch = SimpleNamespace(
+        cuda=SimpleNamespace(
+            is_available=lambda: query("is_available", available),
+            device_count=lambda: query("device_count", count),
+        )
+    )
+    plugin = load(PLUGIN)
+    assert hasattr(plugin, "observe_devices"), "缺少独立设备采样"
+    observation = plugin.observe_devices(torch)
+    assert calls == ["is_available", "device_count"]
+    for name, value in (("is_available", available), ("device_count", count)):
+        if value == "error":
+            assert observation[name] == {"error": f"RuntimeError: {name}"}
+        else:
+            assert observation[name] == {"value": value}
+
+
+def test_runtime_probe_preserves_strict_single_device_check(tmp_path):
+    result, _ = run_case(tmp_path, "def test_ok(): pass\n")
+    assert result.returncode == 0
+    torch_file = tmp_path / "site-packages/torch/__init__.py"
+    torch_file.write_text(
+        torch_file.read_text().replace(
+            "device_count=lambda:1", "device_count=lambda:16"
+        )
+    )
+    command = f"""
+import sys, json
+sys.path.insert(0, {str(tmp_path / "site-packages")!r})
+from tests.support.ppu_ci import inspect_runtime
+observed = {{}}
+try:
+    inspect_runtime({str(tmp_path / "isolated")!r}, {str(ROOT)!r}, [], device_observation=observed)
+except Exception as error:
+    print(json.dumps(dict(observed=observed, error=str(error))))
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", command],
+        cwd=tmp_path / "isolated",
+        env={**os.environ, "VLLM_SAIL_USE_PLA": "1"},
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    data = json.loads(completed.stdout)
+    assert data["observed"] == {
+        "is_available": {"value": True},
+        "device_count": {"value": 16},
+    }
+    assert data["error"] == "需要一张可用 PPU"
+
+
 def test_runner_entrypoint():
     assert RUNNER.is_file(), "缺少设备执行器"
     result = subprocess.run(
@@ -682,6 +749,265 @@ def test_runtime_or_collection_violation(tmp_path, options):
     assert result.returncode != 0
     assert report["status"] == "failure"
     assert report["errors"]
+
+
+def load_diagnostic():
+    path = ROOT / "scripts/ci/ppu_device_probe.py"
+    assert path.is_file(), "缺少独立设备诊断入口"
+    return load(path)
+
+
+@pytest.mark.parametrize("damage", [None, "wheel", "sha", "image", "run"])
+def test_probe_verifies_historical_artifacts(valid_inputs, damage):
+    diagnostic = load_diagnostic()
+    env = {**valid_inputs, "CI_RUN_ID": "456", "PROBE_CODE_SHA": "e" * 40}
+    if damage == "wheel":
+        wheel = next(Path(env["WHEELS_DIR"]).rglob("vllm-*.whl"))
+        with wheel.open("ab") as stream:
+            stream.write(b"changed")
+    elif damage == "sha":
+        env["EXPECTED_SAIL_COMMIT"] = "f" * 40
+    elif damage == "image":
+        env["RUNTIME_IMAGE"] = "registry/other@sha256:" + "b" * 64
+    elif damage == "run":
+        env["EXPECTED_BUILD_RUN_ID"] = "122"
+    if damage:
+        with pytest.raises(ValueError):
+            diagnostic.verify_inputs(env)
+    else:
+        identity, config, manifest = diagnostic.verify_inputs(env)
+        assert identity["build_run_id"] == "123"
+        assert identity["run_id"] == "456"
+        assert identity["wheel_sail_commit"] == "d" * 40
+        assert identity["probe_code_sha"] == "e" * 40
+        assert identity["qualification"] is False
+        assert config["test_catalog"] and len(manifest["wheels"]) == 2
+
+
+@pytest.mark.parametrize("mode", ["preflight", "torch-only"])
+@pytest.mark.parametrize("failure", [None, "multiple", "unavailable", "import"])
+def test_probe_child_always_saves_observations(tmp_path, mode, failure):
+    diagnostic = load_diagnostic()
+    site, isolated = tmp_path / "site-packages", tmp_path / "isolated"
+    fake_install(site)
+    runner_module = load(RUNNER)
+    runner_module.copy_test_tree(ROOT, isolated)
+    torch_file = site / "torch/__init__.py"
+    if failure == "multiple":
+        torch_file.write_text(
+            torch_file.read_text().replace(
+                "device_count=lambda:1", "device_count=lambda:16"
+            )
+        )
+    elif failure == "unavailable":
+        torch_file.write_text(
+            torch_file.read_text().replace(
+                "is_available=lambda:True", "is_available=lambda:False"
+            )
+        )
+    elif failure == "import":
+        torch_file.write_text("raise ImportError('diagnostic import error')\n")
+    output = tmp_path / "observed.json"
+    env = runner_module.clean_environment(os.environ, ROOT, isolated)
+    env.update(PPU_CI_REQUIRES="[]", PPU_PROBE_OUTPUT=str(output))
+    command = f"""
+import sys, importlib.util
+sys.path.insert(0, {str(site)!r})
+spec = importlib.util.spec_from_file_location('probe', {diagnostic.__file__!r})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module.observe({mode!r}, dict(__import__('os').environ))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", command],
+        env=env,
+        cwd=isolated,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    observed = json.loads(output.read_bytes())
+    assert observed["mode"] == mode and observed["qualification"] is False
+    if failure == "import":
+        assert "diagnostic import error" in observed["error"]
+    else:
+        assert observed["devices"]["device_count"]["value"] == (
+            16 if failure == "multiple" else 1
+        )
+        assert observed["devices"]["is_available"]["value"] is (
+            failure != "unavailable"
+        )
+        if mode == "preflight" and failure:
+            assert observed["error"] == "ValueError: 需要一张可用 PPU"
+    assert not (tmp_path / "nodes").exists()
+
+
+def test_probe_pod_metadata_excludes_secrets():
+    diagnostic = load_diagnostic()
+    pod = {
+        "metadata": {"name": "pod", "uid": "uid", "annotations": {"secret": "token"}},
+        "spec": {
+            "nodeName": "node",
+            "containers": [
+                {
+                    "name": "worker",
+                    "image": "image",
+                    "resources": {"limits": {"alibabacloud.com/ppu": "1"}},
+                    "securityContext": {"privileged": True},
+                    "env": [
+                        {"name": "CUDA_VISIBLE_DEVICES", "value": "5"},
+                        {"name": "GITHUB_TOKEN", "value": "secret-token"},
+                    ],
+                }
+            ],
+        },
+        "status": {
+            "phase": "Running",
+            "containerStatuses": [
+                {
+                    "name": "worker",
+                    "imageID": "sha256:image",
+                    "containerID": "containerd://id",
+                }
+            ],
+        },
+    }
+    result = diagnostic.pod_snapshot(pod)
+    assert result["uid"] == "uid" and result["node"] == "node"
+    assert result["worker"]["env"] == {"CUDA_VISIBLE_DEVICES": "5"}
+    assert result["worker_status"]["imageID"] == "sha256:image"
+    assert "token" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("child_failure", [None, "missing", "timeout"])
+def test_probe_execution_never_runs_test_files(
+    valid_inputs, tmp_path, monkeypatch, child_failure
+):
+    diagnostic = load_diagnostic()
+    output = tmp_path / "probe-results"
+    output.mkdir()
+    env = {**os.environ, **valid_inputs, "CI_RUN_ID": "456", "PROBE_CODE_SHA": "e" * 40}
+    identity, _, _ = diagnostic.verify_inputs(env)
+    (output / "cpu-identity.json").write_text(json.dumps(identity))
+    monkeypatch.setattr(diagnostic, "result_directory", lambda *a, **kw: output)
+    monkeypatch.setattr(diagnostic.runner, "require_nas", lambda *a: None)
+    commands = []
+
+    def boundary(command, **kwargs):
+        commands.append(command)
+        if "-c" in command:
+            if child_failure == "timeout":
+                raise subprocess.TimeoutExpired(command, 180)
+            if child_failure == "missing":
+                return subprocess.CompletedProcess(command, 0)
+            Path(kwargs["env"]["PPU_PROBE_OUTPUT"]).write_text(
+                json.dumps(
+                    {
+                        "schema": 1,
+                        "qualification": False,
+                        "mode": kwargs["env"]["PPU_PROBE_MODE"],
+                        "devices": {
+                            "is_available": {"value": True},
+                            "device_count": {"value": 16},
+                        },
+                        "error": "ValueError: 需要一张可用 PPU",
+                    }
+                )
+            )
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", boundary)
+    assert diagnostic.execute(env) == (1 if child_failure else 0)
+    summary = json.loads((output / "probe-summary.json").read_bytes())
+    assert summary["qualification"] is False
+    assert summary["status"] == (
+        "diagnostic-incomplete" if child_failure else "diagnostic-complete"
+    )
+    installs = [c for c in commands if c[1:4] == ["-m", "pip", "install"]]
+    assert len(installs) == 2
+    assert "--no-deps" in installs[0] and "--force-reinstall" in installs[0]
+    assert installs[1][-3:] == [
+        "https://mirrors.aliyun.com/pypi/simple/",
+        "-r",
+        str(ROOT / "requirements/dev.txt"),
+    ]
+    assert len([c for c in commands if "-c" in c]) == 2
+    assert not any("pytest" in c or "serve" in c for c in commands)
+    assert not (output / "summary.json").exists()
+
+
+def test_probe_prepare_creates_distinct_cpu_identity(
+    valid_inputs, tmp_path, monkeypatch
+):
+    diagnostic = load_diagnostic()
+    assert hasattr(diagnostic, "prepare"), "缺少诊断准备"
+    output = tmp_path / "probe"
+    env = {**valid_inputs, "CI_RUN_ID": "456", "PROBE_CODE_SHA": "e" * 40}
+    monkeypatch.setattr(diagnostic, "result_directory", lambda *a, **kw: output)
+    monkeypatch.setattr(diagnostic.runner, "require_nas", lambda *a: None)
+    diagnostic.prepare(env)
+    assert json.loads((output / "cpu-identity.json").read_bytes())["run_id"] == "456"
+    assert (output / "wheel-manifest.json").is_file()
+    with pytest.raises(FileExistsError):
+        diagnostic.prepare(env)
+
+
+@pytest.mark.parametrize("found", [True, False])
+def test_probe_watcher_only_reads_current_pod(
+    valid_inputs, tmp_path, monkeypatch, found
+):
+    diagnostic = load_diagnostic()
+    assert hasattr(diagnostic, "watch"), "缺少清理前 Pod 采集"
+    monkeypatch.setattr(diagnostic, "result_directory", lambda *a, **kw: tmp_path)
+    calls = []
+
+    def command(args, **kwargs):
+        calls.append(args)
+        pod = {
+            "metadata": {"name": args[5], "uid": "uid"},
+            "status": {"containerStatuses": [{"name": "worker", "imageID": "digest"}]},
+        }
+        return subprocess.CompletedProcess(
+            args,
+            0 if found else 1,
+            stdout=json.dumps(pod) if found else "",
+            stderr="" if found else "Forbidden",
+        )
+
+    monkeypatch.setattr(subprocess, "run", command)
+    env = {**valid_inputs, "GITHUB_REPOSITORY_OWNER": "t-head"}
+    diagnostic.watch(env, timeout=0.01, interval=0)
+    assert calls and calls[0][1:] == [
+        "get",
+        "pod",
+        "-n",
+        "ppu-sched",
+        "ppu-t-head-123-1-probe-ppu10-worker-0",
+        "-o",
+        "json",
+    ]
+    report = json.loads((tmp_path / "pod-observation.json").read_bytes())
+    if found:
+        assert report["pod"]["uid"] == "uid"
+    else:
+        assert report["error"] == "Forbidden"
+        assert report["status"] == "unavailable"
+
+
+def test_probe_paths_cannot_overlap_qualification(valid_inputs):
+    diagnostic = load_diagnostic()
+    assert (
+        str(diagnostic.result_directory(valid_inputs, pod=True))
+        == "/mnt/wl_nas/devops/123-1/device-probe/ppu10"
+    )
+    assert (
+        str(diagnostic.result_directory(valid_inputs, pod=False))
+        == "/wl_nas/devops/123-1/device-probe/ppu10"
+    )
+    with pytest.raises(ValueError):
+        diagnostic.result_directory(
+            {**valid_inputs, "DEVICE_BOARD": "../bad"}, pod=True
+        )
 
 
 def test_test_local_pla_monkeypatch_does_not_invalidate_startup(tmp_path):

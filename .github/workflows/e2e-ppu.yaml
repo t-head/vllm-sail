@@ -22,6 +22,14 @@ on:
         default: reg.docker.alibaba-inc.com/ai-tmp/llm:pytorch2.13.0-ubuntu24.04-cuda13.0-vllm0.27.0-py312-ppu202609111952
   workflow_dispatch:
     inputs:
+      device_probe_only:
+        description: 仅诊断双板型设备可见性，不运行模型或资格测试
+        type: boolean
+        default: false
+      probe_sail_commit:
+        description: 仅诊断模式必填，原批 wheel 对应的完整 SAIL commit
+        type: string
+        default: ''
       build_run_id:
         description: Run ID of a PPU CI build whose ppu-wheels-<run_id> artifact holds the wheels under test
         required: true
@@ -48,6 +56,7 @@ concurrency:
 
 jobs:
   prepare:
+    if: ${{ !inputs.device_probe_only }}
     name: Resolve model matrix
     runs-on: k8s-runner-group-cpu-thead
     timeout-minutes: 10
@@ -164,3 +173,117 @@ jobs:
             host_network: true
             shm_size: 32Gi
           command: cd /workspace/source && bash scripts/ci/ppu_e2e_smoke.sh
+
+  device-probe:
+    name: Device probe ${{ matrix.board }} (not qualification)
+    if: github.event_name == 'workflow_dispatch' && inputs.device_probe_only
+    runs-on: k8s-runner-group-cpu-thead
+    timeout-minutes: 35
+    container:
+      image: ${{ inputs.image }}
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - board: ppu10
+            selector: OAM-810E
+          - board: ppu15
+            selector: ZW-M890P
+    env:
+      GIT_CONFIG_NOSYSTEM: '1'
+      WHEELS_DIR: /tmp/probe-wheels
+      BUILD_MANIFEST_FILE: /tmp/probe-build/build-manifest.txt
+      SELECTION_FILE: /tmp/probe-selection/selection.json
+      DEVICE_BOARD: ${{ matrix.board }}
+      CI_RUN_ID: ${{ github.run_id }}
+      CI_RUN_ATTEMPT: ${{ github.run_attempt }}
+      PROBE_CODE_SHA: ${{ github.sha }}
+      EXPECTED_SAIL_COMMIT: ${{ inputs.probe_sail_commit }}
+      EXPECTED_BUILD_RUN_ID: ${{ inputs.build_run_id }}
+      EXPECTED_BUILD_IMAGE: ${{ inputs.image }}
+      RUNTIME_IMAGE: ${{ inputs.image }}
+      SAIL_PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple/
+      CPU_RESULTS: /wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/device-probe/${{ matrix.board }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: 准备作业内独立 Git 配置
+        run: |
+          config="$(mktemp "${RUNNER_TEMP}/git-config.XXXXXX")"
+          printf 'GIT_CONFIG_GLOBAL=%s\n' "$config" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: ppu-wheels-${{ inputs.build_run_id }}
+          path: /tmp/probe-wheels
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: ppu-build-diagnostics-${{ inputs.build_run_id }}
+          path: /tmp/probe-build
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          # 诊断入口当前仅接受原构建的第 1 次 attempt。
+          name: ppu-device-selection-${{ inputs.build_run_id }}-1
+          path: /tmp/probe-selection
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ github.token }}
+      - name: 校验原批身份并启动有界只读 Pod 采集
+        run: |
+          EXPECTED_VLLM_COMMIT="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
+          export EXPECTED_VLLM_COMMIT
+          printf 'EXPECTED_VLLM_COMMIT=%s\n' "$EXPECTED_VLLM_COMMIT" >> "$GITHUB_ENV"
+          python scripts/ci/ppu_device_probe.py prepare
+          nohup python scripts/ci/ppu_device_probe.py watch > "$RUNNER_TEMP/probe-watch.log" 2>&1 < /dev/null &
+          printf 'PROBE_WATCH_PID=%s\n' "$!" >> "$GITHUB_ENV"
+      - name: 单卡 Pod 诊断，不运行模型或测试文件
+        uses: t-head/ppu-scheduler-action@a4e03cbbdb2624f4871fff30d7081b34cbc4b7d4
+        with:
+          image: ${{ inputs.image }}
+          nnodes: 0
+          nproc_per_node: 1
+          namespace: ppu-sched
+          node_selector: board-type=${{ matrix.selector }}
+          timeout_minutes: 25
+          cleanup_policy: always
+          job_suffix: probe-${{ matrix.board }}
+          source_dir: /workspace/source
+          artifact_paths: |
+            /tmp/probe-wheels
+            /tmp/probe-build
+            /tmp/probe-selection
+          extra_env: WHEELS_DIR=/workspace/source/probe-wheels,BUILD_MANIFEST_FILE=/workspace/source/probe-build/build-manifest.txt,SELECTION_FILE=/workspace/source/probe-selection/selection.json,EXPECTED_VLLM_COMMIT=${{ env.EXPECTED_VLLM_COMMIT }},EXPECTED_SAIL_COMMIT=${{ inputs.probe_sail_commit }},EXPECTED_BUILD_RUN_ID=${{ inputs.build_run_id }},EXPECTED_BUILD_IMAGE=${{ inputs.image }},RUNTIME_IMAGE=${{ inputs.image }},PROBE_CODE_SHA=${{ github.sha }},CI_RUN_ID=${{ github.run_id }},CI_RUN_ATTEMPT=${{ github.run_attempt }},DEVICE_BOARD=${{ matrix.board }},SAIL_PIP_INDEX_URL=${{ env.SAIL_PIP_INDEX_URL }}
+          container_options: |
+            privileged: true
+            host_ipc: true
+            host_network: true
+            shm_size: 8Gi
+          command: cd /workspace/source && python scripts/ci/ppu_device_probe.py run
+      - name: 停止只读采集并等待证据落盘
+        if: always()
+        run: |
+          if [[ -d "$CPU_RESULTS" ]]; then
+            touch "$CPU_RESULTS/watch.stop"
+          fi
+          if [[ -n "${PROBE_WATCH_PID:-}" ]]; then
+            for _ in {1..15}; do
+              kill -0 "$PROBE_WATCH_PID" 2>/dev/null || break
+              sleep 1
+            done
+          fi
+      - name: 上传诊断证据，不作为资格结果
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ppu-device-probe-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.board }}
+          path: /wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/device-probe/${{ matrix.board }}/
+          if-no-files-found: error
+          retention-days: 14
