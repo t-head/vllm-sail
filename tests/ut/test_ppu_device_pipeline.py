@@ -8,6 +8,7 @@ import importlib.util
 import itertools
 import json
 import os
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -468,6 +469,73 @@ def test_container_checkout_uses_isolated_regular_git_config(
         )
     assert paths[0] != paths[1]
     assert global_config.read_text() == system_config.read_text() == original
+
+
+@pytest.mark.parametrize("job_id", ["device-tests", "device-summary"])
+@pytest.mark.parametrize("override", [None, "https://packages.example/simple/"])
+def test_cpu_dependencies_use_explicit_test_index(job_id, override, tmp_path):
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/ppu-device-tests.yaml").read_text()
+    )
+    assert (
+        workflow["env"].get("SAIL_PIP_INDEX_URL")
+        == "https://mirrors.aliyun.com/pypi/simple/"
+    )
+    job = workflow["jobs"][job_id]
+    step = next(s for s in job["steps"] if "pip install" in s.get("run", ""))
+    index = override or workflow["env"]["SAIL_PIP_INDEX_URL"]
+    # 执行 YAML 中的真实 shell；仅以函数截获 Python 边界，避免联网安装。
+    result = subprocess.run(
+        [
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-euo",
+            "pipefail",
+            "-c",
+            "python() { printf '%s\\n' \"$*\"; }\n" + step["run"],
+        ],
+        env={
+            "PATH": os.defpath,
+            "SAIL_PIP_INDEX_URL": index,
+            "PIP_INDEX_URL": "https://unreachable.example/simple/",
+            "DEVICE_JOB_RESULT": "success",
+        },
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    commands = [shlex.split(line) for line in result.stdout.splitlines()]
+    assert commands[0] == [
+        "-m",
+        "pip",
+        "install",
+        "--index-url",
+        index,
+        "-r",
+        "requirements/dev.txt",
+    ]
+    assert commands[1][0] == "scripts/ci/ppu_device_runner.py"
+
+
+def test_scheduler_forwards_test_index_without_changing_image():
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/ppu-device-tests.yaml").read_text()
+    )
+    device = workflow["jobs"]["device-tests"]
+    scheduler = next(
+        s for s in device["steps"] if "ppu-scheduler-action" in s.get("uses", "")
+    )
+    extra_env = dict(
+        item.split("=", 1) for item in scheduler["with"]["extra_env"].split(",")
+    )
+    assert extra_env.get("SAIL_PIP_INDEX_URL") == "${{ env.SAIL_PIP_INDEX_URL }}"
+    assert (
+        device["container"]["image"]
+        == scheduler["with"]["image"]
+        == "${{ inputs.image }}"
+    )
 
 
 def test_summary_does_not_inherit_container_git_config():

@@ -536,6 +536,10 @@ def execute(env):
                         "-m",
                         "pip",
                         "install",
+                        # 仅为普通测试工具指定源；本批 wheel 仍以 --no-deps 安装。
+                        "--index-url",
+                        env.get("SAIL_PIP_INDEX_URL")
+                        or "https://mirrors.aliyun.com/pypi/simple/",
                         "-r",
                         str(ROOT / "requirements/dev.txt"),
                     ],

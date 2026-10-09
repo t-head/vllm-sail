@@ -365,9 +365,12 @@ def test_selection_cli_with_verified_wheels(runner, valid_inputs, tmp_path):
     assert "has_tests=true" in github_output.read_text()
 
 
-@pytest.mark.parametrize("failure", [None, "pytest", "preflight", "missing-report"])
+@pytest.mark.parametrize("pip_index", [None, "", "https://packages.example/simple/"])
+@pytest.mark.parametrize(
+    "failure", [None, "install", "pytest", "preflight", "missing-report"]
+)
 def test_execute_only_publishes_success_after_complete_evidence(
-    runner, valid_inputs, tmp_path, monkeypatch, failure
+    runner, valid_inputs, tmp_path, monkeypatch, failure, pip_index
 ):
     # 只替换设备/NAS/安装边界，执行真实 pytest 子进程和全部证据校验。
     case = tmp_path / "case"
@@ -405,7 +408,15 @@ def test_execute_only_publishes_success_after_complete_evidence(
     output.mkdir()
     probe = dict(run_id="123", run_attempt="1", group_id="ppu10-0", nonce="test")
     runner.select.write_json(output / "cpu-probe.json", probe)
-    env = {**os.environ, **valid_inputs, "DEVICE_RESULTS_DIR": str(output)}
+    env = {
+        **os.environ,
+        **valid_inputs,
+        "DEVICE_RESULTS_DIR": str(output),
+        "PIP_INDEX_URL": "https://unreachable.example/simple/",
+    }
+    env.pop("SAIL_PIP_INDEX_URL", None)
+    if pip_index is not None:
+        env["SAIL_PIP_INDEX_URL"] = pip_index
     monkeypatch.setattr(runner, "ROOT", repo)
     monkeypatch.setattr(runner, "result_path", lambda *a, **kw: output)
     monkeypatch.setattr(runner, "require_nas", lambda mount: None)
@@ -428,6 +439,8 @@ def test_execute_only_publishes_success_after_complete_evidence(
     def device_boundary(command, **kwargs):
         if command[1:3] == ["-m", "pip"]:
             installed.append(command)
+            if failure == "install" and "-r" in command:
+                raise subprocess.CalledProcessError(1, command)
             return subprocess.CompletedProcess(command, 0)
         if command[1] == "-c":
             if failure == "preflight":
@@ -457,14 +470,27 @@ def test_execute_only_publishes_success_after_complete_evidence(
     assert summary["status"] == ("success" if failure is None else "failure")
     assert "--no-deps" in installed[0] and "--force-reinstall" in installed[0]
     assert len(installed[0][installed[0].index("--force-reinstall") + 1 :]) == 2
-    if failure != "preflight":
+    assert installed[1] == [
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "--index-url",
+        pip_index or "https://mirrors.aliyun.com/pypi/simple/",
+        "-r",
+        str(repo / "requirements/dev.txt"),
+    ]
+    assert len(installed) == 2  # 不追加设备库安装或升级命令。
+    if failure not in {"preflight", "install"}:
         assert (
             json.loads((output / "nodes/second.json").read_bytes())["status"]
             == "success"
         )
     else:
-        assert summary["failure_stage"] == "preflight"
+        assert summary["failure_stage"] == failure
         assert not (output / "nodes").exists()
+        if failure == "install":
+            assert not (output / "preflight.log").exists()
 
 
 def load(path):
