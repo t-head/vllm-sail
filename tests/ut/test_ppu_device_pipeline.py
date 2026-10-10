@@ -8,6 +8,7 @@ import importlib.util
 import itertools
 import json
 import os
+import re
 import shlex
 import subprocess
 from pathlib import Path
@@ -274,6 +275,18 @@ def test_summary_cli_rejects_extra_partial_artifact(
     )
     with pytest.raises((ValueError, OSError)):
         runner.main()
+
+
+@pytest.mark.parametrize(
+    "filename",
+    ["build-ppu-wheels.yaml", "e2e-ppu.yaml", "ppu-device-tests.yaml"],
+)
+def test_device_workflows_have_no_chinese_text(filename):
+    text = (ROOT / ".github/workflows" / filename).read_text()
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        assert not re.search(r"[\u3400-\u4dbf\u4e00-\u9fff]", line), (
+            f"{filename}:{line_number}: translate workflow text to English: {line}"
+        )
 
 
 def test_manual_workflow_does_not_change_pr_gate():

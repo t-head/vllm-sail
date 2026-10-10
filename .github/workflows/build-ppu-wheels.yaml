@@ -10,22 +10,22 @@ on:
         default: ""
         type: string
       build_image:
-        description: 设备验证构建镜像完整 digest；空值使用批准基线
+        description: Full digest-pinned build image for device validation (blank uses the approved baseline)
         required: false
         default: ""
         type: string
       device_image:
-        description: 设备运行镜像完整 digest；空值使用批准基线
+        description: Full digest-pinned device runtime image (blank uses the approved baseline)
         required: false
         default: ""
         type: string
       device_test_scope:
-        description: 首阶段手动入口始终 full，auto 留待资格验证后启用
+        description: Initial manual runs always use full; auto remains disabled until qualification
         default: full
         type: choice
         options: [auto, full]
       qualification_mode:
-        description: 收集双板型候选资格证据，不自动批准
+        description: Collect candidate qualification evidence for both board types without automatic approval
         default: false
         type: boolean
       sdk_url:
@@ -135,7 +135,7 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
           fetch-depth: 0
-      - name: 固定手动验证身份与镜像
+      - name: Pin manual validation identity and images
         id: detect
         env:
           BUILD_IMAGE_OVERRIDE: ${{ inputs.build_image }}
@@ -154,7 +154,7 @@ jobs:
           environment = json.loads(Path('scripts/ci/ppu_device_environment.json').read_bytes())
           validate_config(json.loads(Path('scripts/ci/ppu_device_tests.json').read_bytes()), root)
           qualified = validate_environment(environment)
-          require(qualified or os.environ['QUALIFICATION_MODE'] == 'true', '初次基线必须开启 qualification_mode')
+          require(qualified or os.environ['QUALIFICATION_MODE'] == 'true', 'Initial baseline requires qualification_mode')
           image = resolve_build_image(environment, os.environ['BUILD_IMAGE_OVERRIDE'])
           runtime = digest_image(os.environ['DEVICE_IMAGE_OVERRIDE'] or environment['runtime_image'])
           expected = sha(os.environ['VLLM_REF_OVERRIDE'] or Path('.github/vllm-main-verified.commit').read_text().strip())
@@ -183,7 +183,7 @@ jobs:
       PYTORCH_SAIL_ARCH: ${{ inputs.pytorch_sail_arch }}
       ARTIFACT_DIR: ${{ github.workspace }}/artifacts
     steps:
-      - name: 准备作业内独立 Git 配置
+      - name: Prepare isolated job-local Git configuration
         id: git-config
         shell: bash
         run: |
@@ -195,7 +195,7 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
           fetch-depth: 0
-      - name: 构建本次正式 wheel
+      - name: Build qualification wheels for this run
         run: bash scripts/ci/build_ppu_wheels.sh
       - uses: actions/upload-artifact@v4
         with:
@@ -238,7 +238,7 @@ jobs:
         with:
           name: ppu-build-diagnostics-${{ github.run_id }}
           path: device-build-diagnostics
-      - name: 校验产物并生成 full 清单
+      - name: Validate artifacts and generate the full test selection
         id: select
         env:
           BUILD_IMAGE: ${{ needs.detect-device-changes.outputs.build_image }}
