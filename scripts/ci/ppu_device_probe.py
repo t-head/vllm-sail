@@ -47,6 +47,24 @@ SAFE_ENV = (
 )
 
 
+def suite_entries(config, board, suite):
+    runner.require(suite in ("visibility", "gdn"), "未知诊断专项")
+    if suite == "visibility":
+        return []
+    catalog = {entry["id"]: entry for entry in config["test_catalog"]}
+    entries = []
+    for kind in ("decode", "prefill"):
+        entry = catalog.get("gdn-" + kind)
+        runner.require(
+            entry is not None
+            and entry["test"] == f"tests/e2e/fork_port/test_gdn_pla_{kind}.py"
+            and board in entry["boards"],
+            "GDN 专项目录缺失或板型不适用",
+        )
+        entries.append(entry)
+    return entries
+
+
 def verify_inputs(env):
     # 不调用或放宽资格执行器的同 run 限制；这里明确校验历史产物身份。
     path = Path(env["SELECTION_FILE"])
@@ -88,10 +106,17 @@ def verify_inputs(env):
     )
     runner.require(fingerprint == original["build_fingerprint"], "诊断构建指纹不符")
     runner.require(env["DEVICE_BOARD"] in select.BOARDS, "非法诊断板型")
+    suite = env.get("PROBE_SUITE", "visibility")
+    entries = suite_entries(config, env["DEVICE_BOARD"], suite)
     return (
         {
             "schema": 1,
             "qualification": False,
+            "suite": suite,
+            "test_sources": {
+                entry["test"]: select.checksum((ROOT / entry["test"]).read_bytes())
+                for entry in entries
+            },
             "run_id": select.decimal(env["CI_RUN_ID"]),
             "run_attempt": select.decimal(env["CI_RUN_ATTEMPT"]),
             "probe_code_sha": select.sha(env["PROBE_CODE_SHA"]),
@@ -180,6 +205,36 @@ def capture(command):
         return {"error": f"{type(error).__name__}: {error}"}
 
 
+def validate_gdn_files(config, board, output, records):
+    entries = suite_entries(config, board, "gdn")
+    runner.require(
+        [(r["test_id"], r["file"]) for r in records]
+        == [(e["id"], e["test"]) for e in entries],
+        "GDN 专项文件缺失、重复或多余",
+    )
+    for entry, record in zip(entries, records, strict=True):
+        runner.require(record["outcome"] == "success", "GDN 文件未成功")
+        runner.validate_file_evidence(output, entry, board)
+
+
+def finish(env):
+    """在 CPU 上复核双板型矩阵中本板型的身份、节点和 JUnit。"""
+    identity, config, _ = verify_inputs(env)
+    runner.require(identity["suite"] == "gdn", "仅 GDN 专项需要测试证据收口")
+    output = result_directory(env, pod=False)
+    report = json.loads((output / "probe-summary.json").read_bytes())
+    runner.require(
+        json.loads((output / "cpu-identity.json").read_bytes()) == identity
+        and all(report.get(k) == v for k, v in identity.items()),
+        "GDN 专项报告身份不符",
+    )
+    runner.require(
+        report["status"] == "gdn-passed" and report["error"] is None,
+        "GDN 专项未通过",
+    )
+    validate_gdn_files(config, identity["board"], output, report["files"])
+
+
 def execute(env):
     output = result_directory(env, pod=True)
     runner.require_nas(Path("/mnt/wl_nas"))
@@ -188,7 +243,13 @@ def execute(env):
         json.loads((output / "cpu-identity.json").read_bytes()) == identity,
         "CPU/Pod 诊断身份不同",
     )
-    report = {**identity, "status": "diagnostic-incomplete", "error": None}
+    entries = suite_entries(config, identity["board"], identity["suite"])
+    report = {
+        **identity,
+        "status": "gdn-failed" if entries else "diagnostic-incomplete",
+        "error": None,
+        "files": [],
+    }
     select.write_json(output / "probe-summary.json", report)
     select.write_json(
         output / "worker-environment.json",
@@ -247,7 +308,7 @@ def execute(env):
                 sorted(
                     {
                         r
-                        for t in config["test_catalog"]
+                        for t in (entries or config["test_catalog"])
                         if identity["board"] in t["boards"]
                         for r in t["requires"]
                     }
@@ -292,13 +353,34 @@ def execute(env):
                             "error": f"{type(error).__name__}: {error}"
                         }
                 select.write_json(output / "probe-summary.json", report)
-            report["status"] = (
-                "diagnostic-complete"
-                if all(
-                    item.get("returncode") == 0 for item in report["children"].values()
-                )
-                else "diagnostic-incomplete"
+            complete = all(
+                item.get("returncode") == 0 for item in report["children"].values()
             )
+            if entries:
+                runner.require(complete, "GDN 预检子进程未完成")
+                preflight = json.loads(
+                    (output / "preflight-observation.json").read_bytes()
+                )
+                runner.require(
+                    preflight.get("error") is None
+                    and preflight.get("runtime")
+                    and preflight["devices"].get("is_available", {}).get("value")
+                    is True
+                    and preflight["devices"].get("device_count", {}).get("value") == 1,
+                    "GDN 需要通过严格单卡安装态预检",
+                )
+                # 原 full selection 保持不变；专项文件由固定白名单确定。
+                config_path = output / "gdn-test-config.json"
+                select.write_json(config_path, config)
+                report["files"] = runner.run_files(
+                    entries, identity["board"], config_path, isolated, output, child_env
+                )
+                validate_gdn_files(config, identity["board"], output, report["files"])
+                report["status"] = "gdn-passed"
+            else:
+                report["status"] = (
+                    "diagnostic-complete" if complete else "diagnostic-incomplete"
+                )
     except Exception as error:
         report["error"] = f"{type(error).__name__}: {error}"
     finally:
@@ -310,7 +392,7 @@ def execute(env):
                 "smi": capture([shutil.which("ppu-smi") or "nvidia-smi"]),
             },
         )
-    return 0 if report["status"] == "diagnostic-complete" else 1
+    return 0 if report["status"] in ("diagnostic-complete", "gdn-passed") else 1
 
 
 def pod_snapshot(pod):
@@ -395,7 +477,9 @@ def watch(env, *, timeout=1500, interval=2):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("run", "child", "prepare", "watch"))
+    parser.add_argument(
+        "command", choices=("run", "child", "prepare", "watch", "finish")
+    )
     args = parser.parse_args()
     env = dict(os.environ)
     if args.command == "child":
@@ -404,5 +488,7 @@ if __name__ == "__main__":
         prepare(env)
     elif args.command == "watch":
         watch(env)
+    elif args.command == "finish":
+        finish(env)
     else:
         sys.exit(execute(env))

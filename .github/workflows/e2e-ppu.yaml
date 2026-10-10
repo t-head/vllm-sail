@@ -23,9 +23,16 @@ on:
   workflow_dispatch:
     inputs:
       device_probe_only:
-        description: 仅诊断双板型设备可见性，不运行模型或资格测试
+        description: 仅运行双板型非资格诊断，不运行模型或资格测试
         type: boolean
         default: false
+      probe_suite:
+        description: 仅 device_probe_only 生效；visibility 观测设备，gdn 执行两份 GDN 测试
+        type: choice
+        default: visibility
+        options:
+          - visibility
+          - gdn
       probe_sail_commit:
         description: 仅诊断模式必填，原批 wheel 对应的完整 SAIL commit
         type: string
@@ -199,6 +206,7 @@ jobs:
       CI_RUN_ID: ${{ github.run_id }}
       CI_RUN_ATTEMPT: ${{ github.run_attempt }}
       PROBE_CODE_SHA: ${{ github.sha }}
+      PROBE_SUITE: ${{ inputs.probe_suite }}
       EXPECTED_SAIL_COMMIT: ${{ inputs.probe_sail_commit }}
       EXPECTED_BUILD_RUN_ID: ${{ inputs.build_run_id }}
       EXPECTED_BUILD_IMAGE: ${{ inputs.image }}
@@ -244,7 +252,7 @@ jobs:
           python scripts/ci/ppu_device_probe.py prepare
           nohup python scripts/ci/ppu_device_probe.py watch > "$RUNNER_TEMP/probe-watch.log" 2>&1 < /dev/null &
           printf 'PROBE_WATCH_PID=%s\n' "$!" >> "$GITHUB_ENV"
-      - name: 单卡 Pod 诊断，不运行模型或测试文件
+      - name: 单卡 Pod 非资格诊断（设备观测或 GDN 专项）
         uses: t-head/ppu-scheduler-action@a4e03cbbdb2624f4871fff30d7081b34cbc4b7d4
         with:
           image: ${{ inputs.image }}
@@ -260,7 +268,7 @@ jobs:
             /tmp/probe-wheels
             /tmp/probe-build
             /tmp/probe-selection
-          extra_env: WHEELS_DIR=/workspace/source/probe-wheels,BUILD_MANIFEST_FILE=/workspace/source/probe-build/build-manifest.txt,SELECTION_FILE=/workspace/source/probe-selection/selection.json,EXPECTED_VLLM_COMMIT=${{ env.EXPECTED_VLLM_COMMIT }},EXPECTED_SAIL_COMMIT=${{ inputs.probe_sail_commit }},EXPECTED_BUILD_RUN_ID=${{ inputs.build_run_id }},EXPECTED_BUILD_IMAGE=${{ inputs.image }},RUNTIME_IMAGE=${{ inputs.image }},PROBE_CODE_SHA=${{ github.sha }},CI_RUN_ID=${{ github.run_id }},CI_RUN_ATTEMPT=${{ github.run_attempt }},DEVICE_BOARD=${{ matrix.board }},SAIL_PIP_INDEX_URL=${{ env.SAIL_PIP_INDEX_URL }}
+          extra_env: WHEELS_DIR=/workspace/source/probe-wheels,BUILD_MANIFEST_FILE=/workspace/source/probe-build/build-manifest.txt,SELECTION_FILE=/workspace/source/probe-selection/selection.json,EXPECTED_VLLM_COMMIT=${{ env.EXPECTED_VLLM_COMMIT }},EXPECTED_SAIL_COMMIT=${{ inputs.probe_sail_commit }},EXPECTED_BUILD_RUN_ID=${{ inputs.build_run_id }},EXPECTED_BUILD_IMAGE=${{ inputs.image }},RUNTIME_IMAGE=${{ inputs.image }},PROBE_CODE_SHA=${{ github.sha }},PROBE_SUITE=${{ inputs.probe_suite }},CI_RUN_ID=${{ github.run_id }},CI_RUN_ATTEMPT=${{ github.run_attempt }},DEVICE_BOARD=${{ matrix.board }},SAIL_PIP_INDEX_URL=${{ env.SAIL_PIP_INDEX_URL }}
           container_options: |
             privileged: true
             host_ipc: true
@@ -283,6 +291,9 @@ jobs:
               sleep 1
             done
           fi
+      - name: 复核 GDN 专项身份、节点及 JUnit
+        if: always() && inputs.probe_suite == 'gdn'
+        run: python scripts/ci/ppu_device_probe.py finish
       - name: 上传诊断证据，不作为资格结果
         if: always()
         uses: actions/upload-artifact@v4

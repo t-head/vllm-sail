@@ -180,6 +180,29 @@ def test_manual_device_probe_is_separate_from_model_and_qualification() -> None:
     assert "ppu_e2e_smoke.sh" not in probe and "ppu_device_runner.py run" not in probe
 
 
+def test_manual_gdn_probe_is_explicit_and_reuses_strict_evidence() -> None:
+    import yaml
+
+    workflow = yaml.safe_load(WORKFLOW.read_text())
+    trigger = workflow.get("on", workflow.get(True))
+    suite = trigger["workflow_dispatch"]["inputs"]["probe_suite"]
+    assert suite["type"] == "choice"
+    assert suite["default"] == "visibility"
+    assert suite["options"] == ["visibility", "gdn"]
+    assert "probe_suite" not in trigger["workflow_call"]["inputs"]
+    probe = workflow["jobs"]["device-probe"]
+    assert probe["env"]["PROBE_SUITE"] == "${{ inputs.probe_suite }}"
+    scheduler = next(
+        s for s in probe["steps"] if "ppu-scheduler-action" in s.get("uses", "")
+    )
+    assert "PROBE_SUITE=${{ inputs.probe_suite }}" in scheduler["with"]["extra_env"]
+    finish = next(
+        s for s in probe["steps"] if "ppu_device_probe.py finish" in s.get("run", "")
+    )
+    assert finish["if"] == "always() && inputs.probe_suite == 'gdn'"
+    assert "continue-on-error" not in WORKFLOW.read_text()
+
+
 def test_e2e_workflow_pulls_wheels_by_run_id() -> None:
     text = WORKFLOW.read_text()
     assert "build_run_id:" in text

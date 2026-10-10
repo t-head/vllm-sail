@@ -936,6 +936,189 @@ def test_probe_execution_never_runs_test_files(
     assert not (output / "summary.json").exists()
 
 
+@pytest.mark.parametrize("board", ["ppu10", "ppu15"])
+@pytest.mark.parametrize("suite", ["visibility", "gdn", "invalid"])
+def test_probe_suite_is_explicit_and_binds_test_sources(valid_inputs, board, suite):
+    diagnostic = load_diagnostic()
+    env = {
+        **valid_inputs,
+        "PROBE_CODE_SHA": "e" * 40,
+        "PROBE_SUITE": suite,
+        "DEVICE_BOARD": board,
+    }
+    if suite == "invalid":
+        with pytest.raises(ValueError, match="专项"):
+            diagnostic.verify_inputs(env)
+        return
+    identity, _, _ = diagnostic.verify_inputs(env)
+    assert identity["suite"] == suite
+    assert identity["qualification"] is False
+    expected = (
+        {
+            f"tests/e2e/fork_port/test_gdn_pla_{kind}.py": diagnostic.select.checksum(
+                (ROOT / f"tests/e2e/fork_port/test_gdn_pla_{kind}.py").read_bytes()
+            )
+            for kind in ("decode", "prefill")
+        }
+        if suite == "gdn"
+        else {}
+    )
+    assert identity["test_sources"] == expected
+
+
+def _write_gdn_probe_evidence(command, env, damage):
+    """仅构造控制面契约夹具；不冒充设备数值执行。"""
+    plugin = load(PLUGIN)
+    test = command[command.index("tests.support.ppu_ci") + 1]
+    node = test + "::test_numerical"
+    isolated = env["PPU_CI_ISOLATED_ROOT"]
+    config = json.loads(
+        Path(command[command.index("--ppu-ci-config") + 1]).read_bytes()
+    )
+    entry = next(t for t in config["test_catalog"] if t["test"] == test)
+    report = {
+        "schema": 1,
+        "board": env["DEVICE_BOARD"],
+        "file": test,
+        "status": "success",
+        "exitstatus": 0,
+        "errors": [],
+        "collected": [node],
+        "applicable": [node],
+        "hardware_excluded": [],
+        "nodes": {
+            node: {
+                phase: {"outcome": "passed", "wasxfail": None, "duration_seconds": 0.1}
+                for phase in ("setup", "call", "teardown")
+            }
+        },
+        "runtime": {
+            "isolated_root": isolated,
+            "checkout_root": env["PPU_CI_CHECKOUT"],
+            "runtime_env": {"VLLM_SAIL_USE_PLA": True},
+            "paths": {
+                name: "/opt/site-packages/" + name.replace(".", "/") + ".py"
+                for name in set(entry["requires"]) | plugin.RUNTIME_MODULES
+            },
+        },
+    }
+    report["runtime"]["paths"].update(
+        plugin=isolated + "/tests/support/ppu_ci.py",
+        conftest=isolated + "/tests/conftest.py",
+    )
+    if damage == "node-skip" and entry["id"] == "gdn-decode":
+        report["nodes"][node]["call"]["outcome"] = "skipped"
+    Path(command[command.index("--ppu-ci-report") + 1]).write_text(json.dumps(report))
+    junit = Path(command[command.index("--junitxml") + 1])
+    if damage != "missing-junit" or entry["id"] != "gdn-decode":
+        junit.write_text(
+            f'<testsuites><testsuite><testcase classname="{test[:-3].replace("/", ".")}" name="test_numerical"/></testsuite></testsuites>'
+        )
+
+
+@pytest.mark.parametrize("board", ["ppu10", "ppu15"])
+@pytest.mark.parametrize(
+    "damage",
+    [
+        None,
+        "preflight",
+        "multiple",
+        "missing",
+        "timeout",
+        "pytest",
+        "node-skip",
+        "missing-junit",
+    ],
+)
+def test_gdn_probe_runs_only_two_files_and_fails_closed(
+    valid_inputs, tmp_path, monkeypatch, board, damage
+):
+    diagnostic = load_diagnostic()
+    output = tmp_path / "gdn-probe"
+    env = {
+        **os.environ,
+        **valid_inputs,
+        "CI_RUN_ID": "456",
+        "PROBE_CODE_SHA": "e" * 40,
+        "PROBE_SUITE": "gdn",
+        "DEVICE_BOARD": board,
+    }
+    monkeypatch.setattr(diagnostic, "result_directory", lambda *a, **kw: output)
+    monkeypatch.setattr(diagnostic.runner, "require_nas", lambda *a: None)
+    diagnostic.prepare(env)
+    original = Path(env["SELECTION_FILE"]).read_bytes()
+    commands = []
+
+    def boundary(command, **kwargs):
+        commands.append(command)
+        child = kwargs.get("env", {})
+        if "-c" in command:
+            if damage == "timeout":
+                raise subprocess.TimeoutExpired(command, 180)
+            if damage == "missing":
+                return subprocess.CompletedProcess(command, 0)
+            Path(child["PPU_PROBE_OUTPUT"]).write_text(
+                json.dumps(
+                    {
+                        "schema": 1,
+                        "qualification": False,
+                        "mode": child["PPU_PROBE_MODE"],
+                        "devices": {
+                            "is_available": {"value": True},
+                            "device_count": {
+                                "value": 16 if damage == "multiple" else 1
+                            },
+                        },
+                        "error": "preflight failure" if damage == "preflight" else None,
+                        "runtime": {"runtime_env": {"VLLM_SAIL_USE_PLA": True}},
+                    }
+                )
+            )
+        if "pytest" in command:
+            assert Path(kwargs["cwd"]) != ROOT
+            assert "PYTHONPATH" not in child and child["VLLM_SAIL_USE_PLA"] == "1"
+            _write_gdn_probe_evidence(command, child, damage)
+            kwargs["stdout"].write("模拟 pytest 控制面输出\n")
+            if damage == "pytest" and any(
+                "test_gdn_pla_decode.py" == Path(c).name for c in command
+            ):
+                return subprocess.CompletedProcess(command, 1)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", boundary)
+    assert diagnostic.execute(env) == (1 if damage else 0)
+    tests = [c[c.index("tests.support.ppu_ci") + 1] for c in commands if "pytest" in c]
+    blocked = damage in {"preflight", "multiple", "missing", "timeout"}
+    assert tests == (
+        []
+        if blocked
+        else [
+            "tests/e2e/fork_port/test_gdn_pla_decode.py",
+            "tests/e2e/fork_port/test_gdn_pla_prefill.py",
+        ]
+    )
+    summary = json.loads((output / "probe-summary.json").read_bytes())
+    assert summary["suite"] == "gdn" and summary["qualification"] is False
+    assert summary["status"] == ("gdn-failed" if damage else "gdn-passed")
+    assert not (output / "summary.json").exists()
+    assert Path(env["SELECTION_FILE"]).read_bytes() == original
+    if damage:
+        with pytest.raises((ValueError, OSError)):
+            diagnostic.finish(env)
+    else:
+        diagnostic.finish(env)
+        # CPU 收口必须重新检查身份与证据，不能只信任成功状态。
+        summary["probe_code_sha"] = "f" * 40
+        (output / "probe-summary.json").write_text(json.dumps(summary))
+        with pytest.raises(ValueError, match="身份"):
+            diagnostic.finish(env)
+        summary["probe_code_sha"] = env["PROBE_CODE_SHA"]
+        (output / "probe-summary.json").write_text(json.dumps(summary))
+        (output / "junit/gdn-decode.xml").write_text("<broken>")
+        with pytest.raises(ValueError, match="JUnit"):
+            diagnostic.finish(env)
+
+
 def test_probe_prepare_creates_distinct_cpu_identity(
     valid_inputs, tmp_path, monkeypatch
 ):
