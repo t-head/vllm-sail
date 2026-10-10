@@ -39,12 +39,39 @@ need workload-specific tuning.
 | BF16 / FP16 | Dense, attention and unquantized MoE paths | Individual backends may accept only a subset; BF16 dense DeepGEMM is opt-in on PPU 1.5 |
 | INT8 | Quantized dense and MoE compute | Scaling mode and weight layout must match the selected backend |
 | FP8 | Dense, MoE and selected cache paths | Device-specific representation and scaling requirements; not every attention path accepts FP8 |
+| MXFP8 | Dense weight dequantization to BF16 using upstream emulation | FP8 E4M3 values with E8M0 scales for each 32 elements along K; execution uses BF16/FP16 linear operations |
 | MXFP4 | PPU DeepGEMM dense and MoE paths | Requires the matching library and checkpoint layout |
 | INT4 W4A16 | Selected mixed-precision MoE paths | The compressed-tensors path accepts symmetric group-size-32 weights without zero points, expert bias or activation ordering |
 
 Checkpoint format support is specific to the implementation. Weight repacking
 alone does not establish execution support. Native Marlin execution remains
 unavailable; do not infer general GPTQ or AWQ coverage from packing utilities.
+
+### MXFP8 dense emulation
+
+PPU selects `PPUEmulationMxfp8LinearKernel` before CUDA-only MXFP8 kernels.
+It inherits upstream's loading and execution methods and is also available
+through `--linear-backend emulation`. Non-PPU devices retain upstream selection.
+This path applies to MXFP8 dense layers independently of model architecture;
+MoE backend selection is separate.
+
+For a weight of shape `[N, K]`, K must be divisible by 32. Runtime scales have
+shape `[N, K / 32]`. ModelOpt expands checkpoint row-block scales, such as
+`[32, 32]`, to one scale row per weight row while preserving the E8M0 bytes.
+The emulation path does not impose FP8 blockwise K128 constraints or pad K.
+
+Upstream's `VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD=1` is the default. It replaces
+the FP8 weight with BF16 once after loading; subsequent linear calls use that
+weight directly, cast to the activation dtype when needed. Dense-weight storage
+doubles compared with the one-byte FP8 values, and the scale tensor is retained.
+With `VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD=0`, the weight remains FP8 and each
+linear call dequantizes it to a temporary BF16 tensor. Both settings use the
+original E8M0 scale (`2 ** (scale_byte - 127)`) and execute the emulation path.
+
+On a prepared PPU environment, verify both settings with
+`python -m pytest tests/e2e/test_mxfp8_emulation.py -q`. These numerical tests
+cover checkpoint scale expansion and K64/K576 output correctness; CPU/source
+tests do not establish device correctness or full-model support.
 
 ## Model integration
 
