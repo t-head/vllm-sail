@@ -156,10 +156,14 @@ def test_e2e_workflow_is_reusable_and_manual_and_uses_cpu_runner() -> None:
 
 def test_e2e_workflow_pulls_wheels_by_run_id() -> None:
     text = WORKFLOW.read_text()
+    # workflow_call/workflow_dispatch still accept the build_run_id input.
     assert "build_run_id:" in text
     assert "actions/download-artifact@v4" in text
-    assert "run-id: ${{ inputs.build_run_id }}" in text
-    assert "ppu-wheels-${{ inputs.build_run_id }}" in text
+    # The prepare job resolves build_run_id (supplied or latest successful
+    # build), and both the smoke and offline jobs download wheels by that
+    # resolved run-id rather than the raw input.
+    assert "run-id: ${{ needs.prepare.outputs.build_run_id }}" in text
+    assert "ppu-wheels-${{ needs.prepare.outputs.build_run_id }}" in text
 
 
 def test_e2e_workflow_keeps_python_frontend_and_privileged() -> None:

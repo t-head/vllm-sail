@@ -14,6 +14,24 @@ Usage:
 every model. Unknown keys are rejected so a typo fails fast instead of silently
 running nothing. The resulting matrix is printed as ``matrix=<json>`` so a
 workflow step can append it to ``$GITHUB_OUTPUT``.
+
+Offline E2E outputs
+-------------------
+The nightly offline lanes (``e2e-ppu.yaml``) reuse the same catalog as the
+source of truth for the model checkpoint and its pytest routing, so this helper
+also prints three scalar outputs derived from the *first* selected entry:
+
+``model_root``
+    The checkpoint path injected as ``VLLM_SAIL_MODEL_ROOT`` for the offline
+    model lane. Only meaningful while the catalog holds a single model; with
+    several entries the offline runner discovers every ``model_e2e`` test and
+    the first checkpoint wins for the override.
+``offline_test_path`` / ``offline_marker``
+    The pytest path and ``-m`` expression the offline model lane runs, so the
+    workflow never hard-codes them (defaults keep older catalogs working).
+
+These are additive: the ``matrix=`` line and the smoke flow are unchanged, and
+unknown model keys still raise.
 """
 
 from __future__ import annotations
@@ -44,11 +62,22 @@ def build_matrix(catalog: list[dict], models: str) -> dict:
     return {"include": [by_key[key] for key in requested]}
 
 
+def _first_entry(matrix: dict) -> dict:
+    """Return the first ``include`` entry, or ``{}`` when the matrix is empty."""
+    include = matrix.get("include") or []
+    return include[0] if include else {}
+
+
 def main(argv: list[str]) -> int:
     models = argv[0] if argv else ""
     catalog = json.loads(CATALOG.read_text())
     matrix = build_matrix(catalog, models)
     print(f"matrix={json.dumps(matrix, separators=(',', ':'))}")
+    # Additive scalar outputs for the offline nightly lanes (see module docstring).
+    first = _first_entry(matrix)
+    print(f"model_root={first.get('checkpoint', '')}")
+    print(f"offline_test_path={first.get('offline_test_path', 'tests/e2e/models')}")
+    print(f"offline_marker={first.get('offline_marker', 'model_e2e')}")
     return 0
 
 

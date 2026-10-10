@@ -5,6 +5,8 @@
     "served_name": "qwen3.8-27b",
     "board": "OAM-810E",
     "tp": 2,
-    "extra_serve_flags": "--trust-remote-code"
+    "extra_serve_flags": "--trust-remote-code",
+    "offline_test_path": "tests/e2e/models",
+    "offline_marker": "model_e2e"
   }
 ]
