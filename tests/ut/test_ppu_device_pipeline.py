@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""手动设备链路、汇总和未来门禁真值表的 CPU 契约。"""
+"""CPU contracts for the manual device pipeline, aggregation, and future gate truth tables."""
 
 from __future__ import annotations
 
@@ -397,7 +397,7 @@ def test_container_checkout_uses_isolated_regular_git_config(
     assert "if" not in prepare
     assert prepare["shell"] == "bash"
 
-    # 模拟镜像和 checkout 临时 HOME 中的配置，不修改用户或系统配置。
+    # Simulate image and temporary checkout HOME settings without changing user or system configuration.
     home = tmp_path / "home"
     home.mkdir()
     original = '[url "https://mirror.invalid/"]\n\tinsteadOf = https://github.com/\n'
@@ -455,7 +455,7 @@ def test_container_checkout_uses_isolated_regular_git_config(
         paths.append(path)
         isolated_env = {**env, **values}
         assert git("ls-remote", "--get-url", url, environment=isolated_env) == url
-        # 以普通文件写入模拟 safe.directory，验证临时 HOME 不能覆盖隔离配置。
+        # Simulate safe.directory with a regular file and verify temporary HOME cannot override the isolated config.
         path.write_text("[safe]\n\tdirectory = /workspace/source\n")
         assert (
             git(
@@ -484,7 +484,7 @@ def test_cpu_dependencies_use_explicit_test_index(job_id, override, tmp_path):
     job = workflow["jobs"][job_id]
     step = next(s for s in job["steps"] if "pip install" in s.get("run", ""))
     index = override or workflow["env"]["SAIL_PIP_INDEX_URL"]
-    # 执行 YAML 中的真实 shell；仅以函数截获 Python 边界，避免联网安装。
+    # Run the actual YAML shell; intercept only the Python boundary to avoid network installs.
     result = subprocess.run(
         [
             "bash",
@@ -552,7 +552,7 @@ def worker_launch(request, tmp_path):
         for s in workflow["jobs"][job_id]["steps"]
         if "ppu-scheduler-action" in s.get("uses", "")
     )
-    # 执行真实 worker 命令，仅在 Python 进程入口记录导出的环境，避免安装或使用设备。
+    # Run the actual worker command and record exports at Python entry, without installing packages or using devices.
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     python = bin_dir / "python"

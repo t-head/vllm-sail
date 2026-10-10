@@ -37,8 +37,8 @@ def test_models_catalog_is_valid_json_with_required_fields() -> None:
 def test_default_matrix_targets_qwen_on_810e() -> None:
     catalog = json.loads(MODELS.read_text())
     qwen = next(e for e in catalog if e["key"] == "qwen3.8-27b")
-    # Checkpoints are read from /nas_aisw/datasets, the internal ("内部github")
-    # NAS root recorded in the model catalog sheet.
+    # Checkpoints are read from /nas_aisw/datasets, the internal NAS root
+    # recorded in the model catalog sheet.
     assert qwen["checkpoint"] == (
         "/nas_aisw/datasets/checkpoints/LLM/Qwen/v3.8/Qwen3.8-27B"
     )

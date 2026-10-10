@@ -30,7 +30,7 @@ permissions:
   actions: read
 
 env:
-  # 普通测试工具复用构建侧的默认源，不用于替换镜像预装设备库。
+  # Reuse the build index for test tools, not to replace preinstalled device libraries.
   SAIL_PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple/
   WHEELS_DIR: /tmp/device-wheels
   BUILD_MANIFEST_FILE: /tmp/device-build/build-manifest.txt
@@ -68,7 +68,7 @@ jobs:
         id: git-config
         shell: bash
         run: |
-          # checkout 会写入 safe.directory；配置文件需保留到 post 阶段。
+          # Checkout writes safe.directory; retain this config through post-job cleanup.
           config="$(mktemp "${RUNNER_TEMP}/git-config.XXXXXX")"
           printf 'GIT_CONFIG_GLOBAL=%s\n' "$config" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
@@ -117,7 +117,7 @@ jobs:
             host_ipc: true
             host_network: true
             shm_size: 8Gi
-          # 在 worker 内读取分配卡号，并在启动 Python 前设置可见设备。
+          # Read the assigned devices in the worker and set visibility before starting Python.
           command: >-
             cd /workspace/source &&
             export CUDA_VISIBLE_DEVICES="${NVIDIA_VISIBLE_DEVICES:?未取得分配设备}" &&

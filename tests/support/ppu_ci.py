@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""仅由设备 CI 显式加载的安装态与逐节点结果保护。"""
+"""Installed-package and per-node result guards loaded explicitly by device CI only."""
 
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ def write_report(path, report):
 
 
 def observe_devices(torch):
-    """分别采样，避免 availability 的短路掩盖数量或另一项异常。"""
+    """Sample independently so availability checks cannot hide the device count or errors from other queries."""
     result = {}
     for name in ("is_available", "device_count"):
         try:
@@ -147,7 +147,7 @@ def validate_node_report(report, entry, board):
     paths = runtime.get("paths", {})
     required = set(entry["requires"]) | RUNTIME_MODULES
     require(required | {"plugin", "conftest"} <= paths.keys(), "缺少子进程安装态路径")
-    # 汇总在另一台 CPU 上执行，只验证已解析的绝对路径，不要求 pod 文件仍存在。
+    # Aggregation runs on another CPU host: validate resolved absolute paths without requiring Pod files to still exist.
     isolated = PurePosixPath(runtime.get("isolated_root", ""))
     checkout = PurePosixPath(runtime.get("checkout_root", ""))
     require(

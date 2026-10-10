@@ -141,7 +141,7 @@ def test_cargo_git_cli_is_exported_after_environment_setup(tmp_path, cargo_env):
         "GIT_CONFIG_NOSYSTEM": "1",
         "HTTPS_PROXY": "http://proxy.invalid:8080",
     }
-    # 执行真实配置片段，确认 source 后导出的值能传入子进程。
+    # Run the actual config snippet and verify that sourced exports reach subprocesses.
     result = subprocess.run(
         [
             "bash",

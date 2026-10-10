@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""设备选测协议的 CPU 回归，不导入任何设备包。"""
+"""CPU regressions for the device test-selection protocol, without importing device packages."""
 
 from __future__ import annotations
 
@@ -187,7 +187,7 @@ def test_ut_dependency_isolation(selector, tmp_path, text):
 def test_ut_mentions_in_docstrings_are_not_dependencies(selector, tmp_path):
     path = tmp_path / "tests/conftest.py"
     path.parent.mkdir(parents=True)
-    path.write_text('"""tests/ut/ 仅在 CPU 执行。"""\n')
+    path.write_text('"""tests/ut/ runs on CPU only."""\n')
     selector.validate_ut_isolation(tmp_path)
 
 

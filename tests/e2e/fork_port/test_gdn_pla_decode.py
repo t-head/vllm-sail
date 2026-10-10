@@ -2,19 +2,26 @@
 # Plugin registration precedes imports of patched providers.
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""PPU SAIL PLA GDN decode 的分派、数值、边界与性能测试。
+"""Dispatch, numerical, boundary, and performance tests for PPU SAIL PLA GDN decode.
 
-``VLLM_SAIL_USE_PLA`` 控制 PLA 路径，``VLLM_PPU_USE_PLA`` 为低优先级别名。
-通过真实生产 wrapper 比较社区 Triton 与 PLA 的输出和 fp32 状态池：
+``VLLM_SAIL_USE_PLA`` controls the PLA path; ``VLLM_PPU_USE_PLA`` is its
+lower-priority alias. Real production wrappers compare community Triton and PLA
+outputs and fp32 state pools:
 
-* packed decode 使用 ``k_last_packed``；普通及符合条件的 spec 使用 ``k_last``。
-* 非 spec 变长参考使用连续二维逐 token 槽表，PLA 使用一维逐序列终态槽表。
-* bf16 状态、非 128 头维度及 int64 accepted tokens 必须回退到 Triton。
-* 分派通过包装真实 PLA 函数的调用记录验证，不以数值相等替代分派证据。
-* ``NULL_BLOCK_ID=0`` 及未使用槽保持不变，padding 不影响真实请求。
-* 性能测试不包装函数，仅记录时间和显存，不设置性能断言。
+* Packed decode uses ``k_last_packed``; regular and eligible speculative calls
+  use ``k_last``.
+* Non-speculative varlen references use contiguous 2D per-token slot tables;
+  PLA uses 1D per-sequence final-state slots.
+* bf16 states, non-128 head dimensions, and int64 accepted tokens must use Triton.
+* Calls wrapping real PLA functions verify dispatch; numerical equality alone
+  is not dispatch evidence.
+* ``NULL_BLOCK_ID=0`` and unused slots remain unchanged; padding does not affect
+  real requests.
+* Performance tests use unwrapped functions and record time and memory without
+  performance assertions.
 
-整个 E2E 文件要求真实 PPU；无设备环境下的环境变量回归位于 CPU UT。
+This entire E2E file requires a real PPU. Environment-variable regressions also
+run in device-free CPU unit tests.
 """
 
 from types import SimpleNamespace
@@ -75,7 +82,7 @@ def _force_triton(monkeypatch: pytest.MonkeyPatch) -> None:
 def _force_cuda(
     monkeypatch: pytest.MonkeyPatch, pla_module, *, record_calls: bool = False
 ) -> SimpleNamespace:
-    """启用真实 PLA；可选记录调用，性能测试不引入 Mock 开销。"""
+    """Enable real PLA with optional call recording; keep Mock overhead out of benchmarks."""
     monkeypatch.setenv("VLLM_SAIL_USE_PLA", "1")
     kernels = SimpleNamespace(
         k_last=pla_module.fused_sigmoid_gating_delta_rule_forward_k_last,
@@ -253,7 +260,7 @@ def test_ppu_pla_cuda_env_resolution(
     names = ("VLLM_SAIL_USE_PLA", "VLLM_PPU_USE_PLA")
     for name in names:
         with monkeypatch.context() as isolated:
-            # 两种名称分别验证，不能继承 CI 的 canonical=1。
+            # Test each name independently without inheriting CI's canonical=1.
             for candidate in names:
                 isolated.delenv(candidate, raising=False)
             if new_val is not None:
@@ -313,9 +320,11 @@ def test_update_cuda_matches_triton(
     inp = _make_decode_inputs(
         batch, state_dtype=torch.float32, query_lens=query_lens, seed=sum(query_lens)
     )
-    # PLA 非 spec 接口每序列一个终态槽；Triton 原地接口逐 token 读取槽号。
-    # 同行重复同一槽可得到相同终态，且各序列互不覆盖。必须实际分配连续内存，
-    # 不能用 expand 的零 token stride：当前 Triton 写回不乘该 stride。
+    # Non-speculative PLA uses one final-state slot per sequence; in-place
+    # Triton reads a slot per token. Repeating a slot across each row yields
+    # the same final state without cross-sequence writes. Allocate contiguous
+    # storage: expand's zero token stride is invalid because Triton writeback
+    # does not multiply by that stride.
     reference_indices = inp.ssm_state_indices[:, None].repeat(1, max(query_lens))
     assert reference_indices.shape == (batch, max(query_lens))
     assert reference_indices.is_contiguous()
@@ -380,8 +389,9 @@ def test_update_spec_dispatch_and_parity(
         query_lens=[num_spec] * batch,
         seed=12,
     )
-    # 当前 PLA 支持二维 int32 槽表和 int32 accepted tokens。
-    # int64 accepted tokens 仍必须回退；分派用调用记录验证，不从数值相等推断。
+    # PLA supports 2D int32 slot tables and int32 accepted tokens.
+    # int64 accepted tokens must still fall back; verify dispatch through
+    # recorded calls, not by inferring it from numerical equality.
     idx2d = (
         (torch.randperm(batch * num_spec).reshape(batch, num_spec) + 1)
         .to(torch.int32)
@@ -406,10 +416,10 @@ def test_update_spec_dispatch_and_parity(
         calls.k_last.assert_called_once()
         args = calls.k_last.call_args.args
         assert args[10] is idx2d
-        assert args[15] is True  # spec 逐 token 写回，无额外终态写回。
+        assert args[15] is True  # Per-token speculative writeback only.
         assert args[18] is num_accepted
         assert args[-1] is False
-        # 使用已有跨后端数值标准，不再套用同一 Triton 路径的逐位一致标准。
+        # Use existing cross-backend tolerances, not same-path bitwise equality.
         _assert_parity(out_c, out_t, state_c, state_t)
     else:
         calls.k_last.assert_not_called()
@@ -444,7 +454,7 @@ def test_update_falls_back_for_non_128_head_dim(
 # boundary conditions
 # ---------------------------------------------------------------------------
 def test_packed_null_state_idx_isolation(monkeypatch: pytest.MonkeyPatch) -> None:
-    """vLLM 的 NULL_BLOCK_ID=0 不写回；padding 不影响真实请求。"""
+    """Never write back to vLLM's NULL_BLOCK_ID=0; padding must not affect real requests."""
     pla_module = _requires_ppu_pla()
     batch = 4
     inp = _make_decode_inputs(batch, state_dtype=torch.float32, num_slots=8, seed=14)
@@ -481,7 +491,8 @@ def test_packed_null_state_idx_isolation(monkeypatch: pytest.MonkeyPatch) -> Non
     assert calls.k_last_packed.call_count == 2
     calls.k_last.assert_not_called()
     assert all(call.args[-1] is False for call in calls.k_last_packed.call_args_list)
-    # 包括 null slot、被 padding 替换的原槽及其他未使用槽，均须逐位不变。
+    # The null slot, original slot replaced by padding, and all other unused
+    # slots must remain bitwise unchanged.
     untouched = torch.ones(inp.ssm_state.shape[0], dtype=torch.bool, device=DEVICE)
     untouched[used_slots] = False
     torch.testing.assert_close(

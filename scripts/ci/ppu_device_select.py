@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""显式设备选测、配置验证和累计 Git diff；仅依赖标准库。"""
+"""Explicit device test selection, config validation, and cumulative Git diffs using only the standard library."""
 
 from __future__ import annotations
 
@@ -214,7 +214,7 @@ def validate_config(config, repo):
                 if kind == "prefixes":
                     require(path.endswith("/"), "目录前缀必须以 / 结尾")
                 if category == "no_effect":
-                    # 这是无影响策略的安全边界，不是另一份正常选测映射。
+                    # This bounds the no-effect policy; it is not another test-selection mapping.
                     allowed = (
                         (
                             kind == "paths"
@@ -361,7 +361,7 @@ def collect_changes(repo, base_sha, head_sha, tested_sha):
         ).stdout
 
     try:
-        # 浅克隆即使找到一个共同祖先，也未必有完整祖先图。
+        # A shallow clone may find a common ancestor without having the full ancestry graph.
         require(
             git("rev-parse", "--is-shallow-repository").strip() == b"false",
             "shallow_repository",

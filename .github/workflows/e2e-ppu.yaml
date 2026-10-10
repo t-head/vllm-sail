@@ -239,7 +239,7 @@ jobs:
           github-token: ${{ github.token }}
       - uses: actions/download-artifact@v4
         with:
-          # 诊断入口当前仅接受原构建的第 1 次 attempt。
+          # Diagnostics currently accept only the first attempt of the original build.
           name: ppu-device-selection-${{ inputs.build_run_id }}-1
           path: /tmp/probe-selection
           run-id: ${{ inputs.build_run_id }}
@@ -274,7 +274,7 @@ jobs:
             host_ipc: true
             host_network: true
             shm_size: 8Gi
-          # 与资格测试使用相同的 worker 设备绑定，诊断报告记录生效后的环境。
+          # Use the qualification worker's device binding and report the effective environment.
           command: >-
             cd /workspace/source &&
             export CUDA_VISIBLE_DEVICES="${NVIDIA_VISIBLE_DEVICES:?未取得分配设备}" &&

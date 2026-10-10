@@ -120,7 +120,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-  # 未完成双板型资格验证前，这条新链路只接受手动运行。
+  # This pipeline remains manual until both board types are qualified.
   detect-device-changes:
     if: github.event_name == 'workflow_dispatch' && inputs.existing_build_run_id == ''
     runs-on: ubuntu-latest
@@ -187,7 +187,7 @@ jobs:
         id: git-config
         shell: bash
         run: |
-          # checkout 会写入 safe.directory；配置文件需保留到 post 阶段。
+          # Checkout writes safe.directory; retain this config through post-job cleanup.
           config="$(mktemp "${RUNNER_TEMP}/git-config.XXXXXX")"
           printf 'GIT_CONFIG_GLOBAL=%s\n' "$config" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4

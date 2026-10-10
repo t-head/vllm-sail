@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""设备 CI 的隔离、节点证据和失败关闭回归；使用 CPU 假安装包。"""
+"""Device CI regressions for isolation, node evidence, and fail-closed behavior using fake CPU-installed packages."""
 
 from __future__ import annotations
 
@@ -264,7 +264,8 @@ def test_file_failure_does_not_stop_remaining_files(runner, tmp_path):
     config = tmp_path / "config.json"
     config.write_text(json.dumps({"test_catalog": entries}))
     env = runner.clean_environment(os.environ, ROOT, isolated)
-    env["PYTHONPATH"] = str(tmp_path / "site-packages")  # 仅测试夹具提供假安装包。
+    # Only the fixture supplies fake installed packages.
+    env["PYTHONPATH"] = str(tmp_path / "site-packages")
     ticks = iter(range(20))
     output = tmp_path / "results"
     output.mkdir()
@@ -439,7 +440,7 @@ def test_selection_cli_with_verified_wheels(runner, valid_inputs, tmp_path):
 def test_execute_only_publishes_success_after_complete_evidence(
     runner, valid_inputs, tmp_path, monkeypatch, failure, pip_index
 ):
-    # 只替换设备/NAS/安装边界，执行真实 pytest 子进程和全部证据校验。
+    # Replace only device/NAS/install boundaries; run real pytest subprocesses and all evidence checks.
     case = tmp_path / "case"
     case.mkdir()
     result, _ = run_case(case, "def test_ok(): pass\n")
@@ -547,7 +548,7 @@ def test_execute_only_publishes_success_after_complete_evidence(
         "-r",
         str(repo / "requirements/dev.txt"),
     ]
-    assert len(installed) == 2  # 不追加设备库安装或升级命令。
+    assert len(installed) == 2  # No device-library installs or upgrades.
     if failure not in {"preflight", "install"}:
         assert (
             json.loads((output / "nodes/second.json").read_bytes())["status"]
@@ -967,7 +968,7 @@ def test_probe_suite_is_explicit_and_binds_test_sources(valid_inputs, board, sui
 
 
 def _write_gdn_probe_evidence(command, env, damage):
-    """仅构造控制面契约夹具；不冒充设备数值执行。"""
+    """Build only control-plane contract fixtures, not evidence of device numerical execution."""
     plugin = load(PLUGIN)
     test = command[command.index("tests.support.ppu_ci") + 1]
     node = test + "::test_numerical"
@@ -1107,7 +1108,7 @@ def test_gdn_probe_runs_only_two_files_and_fails_closed(
             diagnostic.finish(env)
     else:
         diagnostic.finish(env)
-        # CPU 收口必须重新检查身份与证据，不能只信任成功状态。
+        # CPU finalization must recheck identity and evidence, not just trust a success status.
         summary["probe_code_sha"] = "f" * 40
         (output / "probe-summary.json").write_text(json.dumps(summary))
         with pytest.raises(ValueError, match="身份"):

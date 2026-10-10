@@ -117,7 +117,7 @@ download "${TORCH_URL}" "${TORCH_ARCHIVE}"
 printf 'sdk_sha256=%s\n' "$(sha256 "${SDK_INSTALLER}")" >>"${MANIFEST}"
 printf 'torch_sha256=%s\n' "$(sha256 "${TORCH_ARCHIVE}")" >>"${MANIFEST}"
 
-# job container 是临时环境；移走镜像内软件栈后安装本次指定版本。
+# The job container is temporary; move its bundled stack aside before installing the requested versions.
 for path in /usr/local/PPU_SDK /usr/local/cuda /usr/local/cuda-13.0; do
     if [[ -e "${path}" || -L "${path}" ]]; then
         mv "${path}" "${WORK_DIR}/$(basename "${path}").image"
@@ -181,7 +181,7 @@ git -C "${VLLM_SRC}" checkout --detach FETCH_HEAD
         # shellcheck disable=SC1091
         source "${CARGO_HOME:-$HOME/.cargo}/env"
     fi
-    # Cargo 的 Git 依赖获取复用 Git CLI，遵循作业的 Git 配置隔离。
+    # Fetch Cargo Git dependencies through the Git CLI to honor job-local Git configuration.
     export CARGO_NET_GIT_FETCH_WITH_CLI=true
     # Follow the Rust toolchain pinned by the checked-out vLLM source.
     RUSTUP_TOOLCHAIN="$(python - <<'PY'

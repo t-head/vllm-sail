@@ -162,7 +162,7 @@ def test_dir_lists_resolvable_names_and_unknown_attributes_raise() -> None:
 
 
 def _load_gdn_functions(relative_path, names, namespace):
-    """仅执行指定函数的原始函数体，不导入设备依赖或绕过设备测试门禁。"""
+    """Execute only the selected original function bodies, without device imports or bypassing device-test gates."""
     path = Path(__file__).parents[2] / relative_path
     tree = ast.parse(path.read_text(), filename=str(path))
     functions = [
@@ -186,7 +186,7 @@ def _load_gdn_functions(relative_path, names, namespace):
 def test_gdn_e2e_env_cases_ignore_inherited_ci_environment(
     monkeypatch, kind, raw, expected
 ):
-    """直接复用 E2E 环境测试函数，防止旧接口问题只能在设备 CI 中发现。"""
+    """Reuse E2E environment test functions so stale interfaces are caught before device CI."""
     name = (
         "test_ppu_pla_cuda_env_resolution"
         if kind == "decode"
@@ -212,7 +212,7 @@ def test_gdn_e2e_env_cases_ignore_inherited_ci_environment(
     ],
 )
 def test_gdn_prefill_e2e_resolver_stubs_match_production(monkeypatch, name):
-    """执行真实 resolver 函数体及 E2E stub；不模拟任何数值内核。"""
+    """Execute real resolver bodies and E2E stubs without simulating numerical kernels."""
     resolver = types.ModuleType("_gdn_prefill_env_test")
     resolver.__dict__.update(
         envs=envs,
@@ -246,6 +246,6 @@ def test_gdn_prefill_e2e_resolver_stubs_match_production(monkeypatch, name):
         namespace,
     )
     if name == "test_resolver_tolerates_missing_pla":
-        # 真实设备可能已导入 PLA 子模块；仅屏蔽父包不足以模拟缺包。
+        # Devices may have cached PLA submodules; blocking only the parent cannot simulate a missing package.
         namespace["_install_fake_pla"](monkeypatch)
     namespace[name](monkeypatch)

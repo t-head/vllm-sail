@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""设备安装态执行与 CPU 证据校验；设备依赖只在隔离子进程中加载。"""
+"""Run installed-package device tests and validate evidence on CPU; load device dependencies only in isolated subprocesses."""
 
 from __future__ import annotations
 
@@ -455,7 +455,7 @@ with open(os.environ["PPU_CI_OBSERVATION"], "w") as stream:
 
 
 def execute(env):
-    # 必须先确认共享挂载及 CPU 探针，失败时不创建本地同名结果树。
+    # Verify the shared mount and CPU probe before creating any local results tree.
     output = result_path(
         env["CI_RUN_ID"], env["CI_RUN_ATTEMPT"], env["DEVICE_GROUP_ID"], pod=True
     )
@@ -536,7 +536,7 @@ def execute(env):
                         "-m",
                         "pip",
                         "install",
-                        # 仅为普通测试工具指定源；本批 wheel 仍以 --no-deps 安装。
+                        # Set the index only for test tools; install this build's wheels with --no-deps.
                         "--index-url",
                         env.get("SAIL_PIP_INDEX_URL")
                         or "https://mirrors.aliyun.com/pypi/simple/",
@@ -555,7 +555,7 @@ def execute(env):
             timings["phases"]["install_seconds"] = time.monotonic() - phase
             stage = "preflight"
             phase = time.monotonic()
-            # 预检当前板型全量依赖，以便发现环境变化后安全扩大。
+            # Preflight all dependencies for this board to allow safe expansion after environment changes.
             entries = [
                 t for t in config["test_catalog"] if identity["board"] in t["boards"]
             ]
@@ -624,7 +624,7 @@ def execute(env):
 
 
 def scheduler_names(groups, owner, run_id, attempt):
-    # 对齐固定 action a4e03cb 的 scripts/submit.sh：owner/suffix 20 字符，整名 52 字符。
+    # Match scripts/submit.sh in pinned action a4e03cb: 20-character owner/suffix, 52-character full name.
     owner = re.sub(r"[^a-z0-9-]", "-", owner.lower()).strip("-")[:20].rstrip("-")
     require(bool(owner), "作业名缺少仓库 owner")
     names = []

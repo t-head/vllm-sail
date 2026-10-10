@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""独立的手动设备诊断；复用历史 wheel，但不生成资格通过证据。"""
+"""Standalone manual device diagnostics reuse historical wheels without producing qualification evidence."""
 
 from __future__ import annotations
 
@@ -66,7 +66,7 @@ def suite_entries(config, board, suite):
 
 
 def verify_inputs(env):
-    # 不调用或放宽资格执行器的同 run 限制；这里明确校验历史产物身份。
+    # Validate historical artifact identities without invoking or relaxing the qualification runner's same-run restriction.
     path = Path(env["SELECTION_FILE"])
     raw = path.read_bytes()
     original = json.loads(raw)
@@ -148,7 +148,7 @@ def result_directory(env, *, pod):
 
 
 def observe(mode, env):
-    """每种导入路径使用独立进程；严格检查失败也先落盘。"""
+    """Use a separate process for each import path and persist results even if strict checks fail."""
     report = {
         "schema": 1,
         "qualification": False,
@@ -174,7 +174,7 @@ def observe(mode, env):
         report["error"] = f"{type(error).__name__}: {error}"
     finally:
         select.write_json(destination, report)
-    # 这些辅助观测在原始设备查询之后进行，不改变首次导入/初始化条件。
+    # Collect auxiliary observations after the original device queries, preserving first-import and initialization conditions.
     report["modules"] = {}
     for name in ("torch", "torch._C", "triton", "pla", "vllm", "vllm_sail"):
         module = sys.modules.get(name)
@@ -218,7 +218,7 @@ def validate_gdn_files(config, board, output, records):
 
 
 def finish(env):
-    """在 CPU 上复核双板型矩阵中本板型的身份、节点和 JUnit。"""
+    """Recheck this board's identity, nodes, and JUnit on CPU within the dual-board matrix."""
     identity, config, _ = verify_inputs(env)
     runner.require(identity["suite"] == "gdn", "仅 GDN 专项需要测试证据收口")
     output = result_directory(env, pod=False)
@@ -369,7 +369,7 @@ def execute(env):
                     and preflight["devices"].get("device_count", {}).get("value") == 1,
                     "GDN 需要通过严格单卡安装态预检",
                 )
-                # 原 full selection 保持不变；专项文件由固定白名单确定。
+                # Preserve the original full selection; use a fixed allowlist for the diagnostic suite.
                 config_path = output / "gdn-test-config.json"
                 select.write_json(config_path, config)
                 report["files"] = runner.run_files(
@@ -437,7 +437,7 @@ def prepare(env):
 
 
 def watch(env, *, timeout=1500, interval=2):
-    # 独立 CPU 进程在 action 无条件清理前保存快照；不保留或修改 Pod。
+    # A separate CPU process saves snapshots before unconditional action cleanup; it neither retains nor modifies the Pod.
     output = result_directory(env, pod=False)
     name = f"ppu-{env['GITHUB_REPOSITORY_OWNER'].lower()}-{env['CI_RUN_ID']}-{env['CI_RUN_ATTEMPT']}-probe-{env['DEVICE_BOARD']}-worker-0"
     report = {"status": "unavailable", "pod_name": name, "error": "尚未取得 Pod"}

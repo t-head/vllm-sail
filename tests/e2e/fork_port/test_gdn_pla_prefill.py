@@ -2,18 +2,21 @@
 # Plugin registration precedes imports of patched providers.
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""PPU PLA（FlashQLA）GDN prefill 的选择、数值和性能测试。
+"""Selection, numerical, and performance tests for PPU PLA (FlashQLA) GDN prefill.
 
-``VLLM_SAIL_USE_PLA`` 默认开启，``VLLM_PPU_USE_PLA`` 为低优先级别名。
-``ChunkGatedDeltaRule`` 经 ``pla_prefill`` resolver 调用
-``pla.prefill.flashqla.chunk_gated_delta_rule_fwd``。
+``VLLM_SAIL_USE_PLA`` defaults to enabled; ``VLLM_PPU_USE_PLA`` is its
+lower-priority alias. ``ChunkGatedDeltaRule`` calls
+``pla.prefill.flashqla.chunk_gated_delta_rule_fwd`` through the ``pla_prefill``
+resolver.
 
-覆盖环境变量、resolver 缺包回退、后端选择、TP 头配置、重复 l2norm 防护，
-以及 ``forward_pla`` 与 ``forward_native`` 的输出和终态数值比较。
-性能测试仅记录时间和显存，不设置性能断言。
-整个 E2E 文件要求真实 PPU；环境变量和 resolver stub 另有无设备 CPU 回归。
+Cover environment variables, missing-package fallback, backend selection, TP
+head configurations, duplicate l2norm prevention, and output/final-state parity
+between ``forward_pla`` and ``forward_native``. Performance tests record time
+and memory without performance assertions.
+This entire E2E file requires a real PPU; environment variables and resolver
+stubs also have device-free CPU regressions.
 
-在 PPU 上运行::
+Run on PPU::
 
     VLLM_SAIL_USE_PLA=1 pytest tests/e2e/fork_port/test_gdn_pla_prefill.py
 """
@@ -385,7 +388,7 @@ def test_ppu_pla_env_resolution(
     new_val: str | None,
     expected: bool,
 ) -> None:
-    """验证 prefill 与 decode 共用的规范名和兼容别名。"""
+    """Verify the canonical name and compatibility alias shared by prefill and decode."""
     names = ("VLLM_SAIL_USE_PLA", "VLLM_PPU_USE_PLA")
     for name in names:
         with monkeypatch.context() as isolated:
@@ -450,7 +453,8 @@ def test_resolver_tolerates_missing_pla(monkeypatch: pytest.MonkeyPatch) -> None
     deployments without `pla` must keep serving.
     """
     _stub_resolver_env(monkeypatch, use_pla=True, is_ppu=True)
-    # 同时屏蔽已缓存的子模块，确保真正模拟缺包，且由 monkeypatch 恢复。
+    # Block cached submodules too, so the missing-package simulation is real;
+    # monkeypatch restores them afterward.
     for name in (
         "pla",
         "pla.prefill",
