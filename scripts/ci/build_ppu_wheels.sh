@@ -107,6 +107,7 @@ TORCH_ARCHIVE="${WORK_DIR}/$(url_basename "${TORCH_URL}")"
     printf 'status=running\n'
     printf 'vllm_ref=%s\n' "${VLLM_REF}"
     printf 'pytorch_sail_arch=%s\n' "${PYTORCH_SAIL_ARCH}"
+    printf 'build_image=%s\n' "${VLLM_SAIL_BUILD_IMAGE:-}"
     printf 'sdk_file=%s\n' "$(basename "${SDK_INSTALLER}")"
     printf 'torch_file=%s\n' "$(basename "${TORCH_ARCHIVE}")"
 } >>"${MANIFEST}"
@@ -116,7 +117,7 @@ download "${TORCH_URL}" "${TORCH_ARCHIVE}"
 printf 'sdk_sha256=%s\n' "$(sha256 "${SDK_INSTALLER}")" >>"${MANIFEST}"
 printf 'torch_sha256=%s\n' "$(sha256 "${TORCH_ARCHIVE}")" >>"${MANIFEST}"
 
-# job container 是临时环境；移走镜像内软件栈后安装本次指定版本。
+# The job container is temporary; move its bundled stack aside before installing the requested versions.
 for path in /usr/local/PPU_SDK /usr/local/cuda /usr/local/cuda-13.0; do
     if [[ -e "${path}" || -L "${path}" ]]; then
         mv "${path}" "${WORK_DIR}/$(basename "${path}").image"
@@ -180,6 +181,8 @@ git -C "${VLLM_SRC}" checkout --detach FETCH_HEAD
         # shellcheck disable=SC1091
         source "${CARGO_HOME:-$HOME/.cargo}/env"
     fi
+    # Fetch Cargo Git dependencies through the Git CLI to honor job-local Git configuration.
+    export CARGO_NET_GIT_FETCH_WITH_CLI=true
     # Follow the Rust toolchain pinned by the checked-out vLLM source.
     RUSTUP_TOOLCHAIN="$(python - <<'PY'
 import tomllib
