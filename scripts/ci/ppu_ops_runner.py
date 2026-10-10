@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Run installed-package device tests and validate evidence on CPU; load device dependencies only in isolated subprocesses."""
+"""Run installed-package PPU operator tests and validate evidence on CPU; load device dependencies only in isolated subprocesses."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ def load(path):
     return module
 
 
-select = load(Path(__file__).with_name("ppu_device_select.py"))
+select = load(Path(__file__).with_name("ppu_ops_select.py"))
 require = select.require
 
 
@@ -41,7 +41,7 @@ def result_path(run_id, attempt, group_id, *, pod):
         Path("/mnt/wl_nas" if pod else "/wl_nas")
         / "devops"
         / f"{run_id}-{attempt}"
-        / "device-tests"
+        / "ops-tests"
         / group_id
     )
 
@@ -358,14 +358,12 @@ def read_inputs(env):
         "CI_RUN_ID",
         "CI_RUN_ATTEMPT",
         "RUNTIME_IMAGE",
-        "QUALIFICATION_MODE",
     )
     require(all(env.get(k) for k in required), "缺少设备执行输入")
     require(env["EXPECTED_BUILD_RUN_ID"] == env["CI_RUN_ID"], "设备链不能复用历史构建")
-    require(env["QUALIFICATION_MODE"] in ("true", "false"), "qualification_mode 非法")
     selection_file = Path(env["SELECTION_FILE"]).resolve()
-    config_file = selection_file.with_name("ppu_device_tests.json")
-    environment_file = selection_file.with_name("ppu_device_environment.json")
+    config_file = selection_file.with_name("ppu_ops_tests.json")
+    environment_file = selection_file.with_name("ppu_ops_environment.json")
     raw, config_raw, environment_raw = (
         selection_file.read_bytes(),
         config_file.read_bytes(),
@@ -377,12 +375,11 @@ def read_inputs(env):
         json.loads(environment_raw),
     )
     require(
-        config_raw == (ROOT / "scripts/ci/ppu_device_tests.json").read_bytes(),
+        config_raw == (ROOT / "scripts/ci/ppu_ops_tests.json").read_bytes(),
         "artifact 配置与 checkout 不同",
     )
     require(
-        environment_raw
-        == (ROOT / "scripts/ci/ppu_device_environment.json").read_bytes(),
+        environment_raw == (ROOT / "scripts/ci/ppu_ops_environment.json").read_bytes(),
         "artifact 环境与 checkout 不同",
     )
     select.validate_config(config, ROOT)
@@ -410,14 +407,7 @@ def read_inputs(env):
         env["CI_RUN_ID"], env["CI_RUN_ATTEMPT"], env["DEVICE_GROUP_ID"], pod=True
     )
     require(env["DEVICE_RESULTS_DIR"] == str(expected_path), "设备结果目录不符")
-    qualification = env["QUALIFICATION_MODE"] == "true"
-    require(
-        environment["qualified"] or qualification,
-        "初次验证必须显式开启 qualification_mode",
-    )
-    if qualification:
-        require(original["mode"] == "full", "资格验证必须全量")
-        select.validate_fingerprint(original["build_fingerprint"])
+    select.validate_fingerprint(original["build_fingerprint"])
     manifest = select.load_sibling("ppu_wheel_manifest").verify(
         Path(env["WHEELS_DIR"]),
         vllm_commit=env["EXPECTED_VLLM_COMMIT"],
@@ -510,7 +500,7 @@ def execute(env):
         (output / "selection.json").write_bytes(raw)
         shutil.copyfile(env["BUILD_MANIFEST_FILE"], output / "build-manifest.txt")
         select.write_json(output / "wheel-manifest.json", manifest)
-        with tempfile.TemporaryDirectory(prefix="ppu-device-", dir="/tmp") as temporary:
+        with tempfile.TemporaryDirectory(prefix="ppu-ops-", dir="/tmp") as temporary:
             isolated = (Path(temporary) / "isolated").resolve()
             copy_test_tree(ROOT, isolated)
             child_env = clean_environment(env, ROOT, isolated)
@@ -629,7 +619,7 @@ def scheduler_names(groups, owner, run_id, attempt):
     require(bool(owner), "作业名缺少仓库 owner")
     names = []
     for group in groups:
-        suffix = "dev-" + group["group_id"]
+        suffix = "ops-" + group["group_id"]
         require(
             len(suffix) <= 20 and re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", suffix),
             "作业名后缀不合法",

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Device CI regressions for isolation, node evidence, and fail-closed behavior using fake CPU-installed packages."""
+"""PPU operator CI regressions for isolation, node evidence, and fail-closed behavior using fake CPU-installed packages."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 PLUGIN = ROOT / "tests/support/ppu_ci.py"
-RUNNER = ROOT / "scripts/ci/ppu_device_runner.py"
+RUNNER = ROOT / "scripts/ci/ppu_ops_runner.py"
 
 
 @pytest.fixture
@@ -94,7 +94,7 @@ except Exception as error:
 def test_runner_entrypoint():
     assert RUNNER.is_file(), "缺少设备执行器"
     result = subprocess.run(
-        ["bash", "-n", str(ROOT / "scripts/ci/ppu_device_test.sh")], capture_output=True
+        ["bash", "-n", str(ROOT / "scripts/ci/ppu_ops_test.sh")], capture_output=True
     )
     assert result.returncode == 0
 
@@ -180,11 +180,11 @@ def test_nas_identity_rejects_invalid_values(runner, run, attempt, group):
 def test_nas_prefix_and_missing_mount(runner, monkeypatch):
     assert (
         str(runner.result_path("123", "2", "ppu10-0", pod=True))
-        == "/mnt/wl_nas/devops/123-2/device-tests/ppu10-0"
+        == "/mnt/wl_nas/devops/123-2/ops-tests/ppu10-0"
     )
     assert (
         str(runner.result_path("123", "2", "ppu10-0", pod=False))
-        == "/wl_nas/devops/123-2/device-tests/ppu10-0"
+        == "/wl_nas/devops/123-2/ops-tests/ppu10-0"
     )
     monkeypatch.setattr(os.path, "ismount", lambda p: False)
     with pytest.raises(ValueError, match="NAS"):
@@ -192,8 +192,8 @@ def test_nas_prefix_and_missing_mount(runner, monkeypatch):
 
 
 def test_runtime_expansion_preserves_other_board(runner):
-    config = json.loads((ROOT / "scripts/ci/ppu_device_tests.json").read_bytes())
-    selector = load(ROOT / "scripts/ci/ppu_device_select.py")
+    config = json.loads((ROOT / "scripts/ci/ppu_ops_tests.json").read_bytes())
+    selector = load(ROOT / "scripts/ci/ppu_ops_select.py")
     original = {
         "mode": "subset",
         "test_ids": ["kda"],
@@ -291,10 +291,10 @@ def valid_inputs(runner, tmp_path):
         "wheels": manifest_tool.wheel_records(wheels),
     }
     runner.select.write_json(wheels / "wheel-manifest.json", manifest)
-    config_path = tmp_path / "ppu_device_tests.json"
-    env_path = tmp_path / "ppu_device_environment.json"
-    shutil.copyfile(ROOT / "scripts/ci/ppu_device_tests.json", config_path)
-    shutil.copyfile(ROOT / "scripts/ci/ppu_device_environment.json", env_path)
+    config_path = tmp_path / "ppu_ops_tests.json"
+    env_path = tmp_path / "ppu_ops_environment.json"
+    shutil.copyfile(ROOT / "scripts/ci/ppu_ops_tests.json", config_path)
+    shutil.copyfile(ROOT / "scripts/ci/ppu_ops_environment.json", env_path)
     image = "registry/image@sha256:" + "a" * 64
     diagnostics = dict(
         sdk_sha256="a" * 64,
@@ -336,15 +336,83 @@ def valid_inputs(runner, tmp_path):
         EXPECTED_BUILD_RUN_ID="123",
         EXPECTED_BUILD_IMAGE=image,
         RUNTIME_IMAGE=image,
-        QUALIFICATION_MODE="true",
         DISPATCH_MATRIX=json.dumps(selection["matrix"]),
     )
 
 
-def test_inputs_verify_real_wheel_archives(runner, valid_inputs):
-    raw, _, config, _, manifest = runner.read_inputs(valid_inputs)
-    assert len(json.loads(raw)["files"]) == len(config["test_catalog"]) == 14
+@pytest.mark.parametrize("board", ["ppu10", "ppu15"])
+def test_full_inputs_need_no_confirmation(runner, valid_inputs, board):
+    assert "QUALIFICATION_MODE" not in valid_inputs
+    valid_inputs["DEVICE_BOARD"] = board
+    valid_inputs["DEVICE_GROUP_ID"] = board + "-0"
+    valid_inputs["DEVICE_RESULTS_DIR"] = str(
+        runner.result_path("123", "1", board + "-0", pod=True)
+    )
+    environment_path = Path(valid_inputs["SELECTION_FILE"]).with_name(
+        "ppu_ops_environment.json"
+    )
+    original_environment = environment_path.read_bytes()
+    raw, _, config, environment, manifest = runner.read_inputs(valid_inputs)
+    selection = json.loads(raw)
+    assert selection["mode"] == "full"
+    assert len(selection["files"]) == len(config["test_catalog"]) == 14
     assert len(manifest["wheels"]) == 2
+    assert environment["qualified"] is False
+    assert environment_path.read_bytes() == original_environment
+
+
+@pytest.mark.parametrize("mode", ["subset", "none"])
+def test_unapproved_inputs_reject_partial_selection(runner, valid_inputs, mode):
+    path = Path(valid_inputs["SELECTION_FILE"])
+    selection = json.loads(path.read_bytes())
+    config = json.loads(path.with_name("ppu_ops_tests.json").read_bytes())
+    ids = ["kda"] if mode == "subset" else []
+    selection.update(
+        mode=mode,
+        test_ids=ids,
+        files=sorted(t["test"] for t in config["test_catalog"] if t["id"] in ids),
+        **runner.select.route_tests(config, ids),
+    )
+    runner.select.write_json(path, selection)
+    valid_inputs["DISPATCH_MATRIX"] = json.dumps(selection["matrix"])
+    with pytest.raises(ValueError, match="非全量清单的环境未经批准"):
+        runner.read_inputs(valid_inputs)
+
+
+@pytest.mark.parametrize(
+    "field,value,message",
+    [
+        ("sdk_sha256", "", "hash"),
+        ("sdk_sha256", "a" * 63, "hash"),
+        ("torch_sha256", "", "hash"),
+        ("torch_sha256", "unknown", "hash"),
+        ("pytorch_sail_arch", "", "架构"),
+        ("pytorch_sail_arch", "ppu_10", "架构"),
+        ("pytorch_sail_arch", "ppu_15", "架构"),
+    ],
+)
+def test_full_inputs_reject_incomplete_fingerprint(
+    runner, valid_inputs, field, value, message
+):
+    path = Path(valid_inputs["SELECTION_FILE"])
+    selection = json.loads(path.read_bytes())
+    build_path = Path(valid_inputs["BUILD_MANIFEST_FILE"])
+    diagnostics = runner.select.read_diagnostics(build_path)
+    diagnostics[field] = value
+    manifest = json.loads(
+        (Path(valid_inputs["WHEELS_DIR"]) / "wheel-manifest.json").read_bytes()
+    )
+    selection["build_fingerprint"] = runner.select.build_fingerprint(
+        diagnostics,
+        manifest,
+        tested_sha=valid_inputs["EXPECTED_SAIL_COMMIT"],
+        expected_vllm_commit=valid_inputs["EXPECTED_VLLM_COMMIT"],
+        build_image=valid_inputs["EXPECTED_BUILD_IMAGE"],
+    )
+    runner.select.write_json(path, selection)
+    build_path.write_text("".join(f"{k}={v}\n" for k, v in diagnostics.items()))
+    with pytest.raises(ValueError, match=message):
+        runner.read_inputs(valid_inputs)
 
 
 @pytest.mark.parametrize(
@@ -369,7 +437,6 @@ def test_dispatch_matrix_must_equal_selection(runner, valid_inputs, matrix):
         ("DEVICE_RESULTS_DIR", "/tmp/results"),
         ("RUNTIME_IMAGE", "registry/image@sha256:" + "b" * 64),
         ("EXPECTED_SAIL_COMMIT", "a" * 40),
-        ("QUALIFICATION_MODE", "false"),
     ],
 )
 def test_invalid_execution_inputs_fail_before_install(
@@ -397,14 +464,14 @@ def test_selection_cli_with_verified_wheels(runner, valid_inputs, tmp_path):
     result = subprocess.run(
         [
             sys.executable,
-            str(ROOT / "scripts/ci/ppu_device_select.py"),
+            str(ROOT / "scripts/ci/ppu_ops_select.py"),
             "select",
             "--repo",
             str(ROOT),
             "--config",
-            str(tmp_path / "ppu_device_tests.json"),
+            str(tmp_path / "ppu_ops_tests.json"),
             "--environment",
-            str(tmp_path / "ppu_device_environment.json"),
+            str(tmp_path / "ppu_ops_environment.json"),
             "--changes",
             str(changes_path),
             "--build-manifest",
@@ -753,7 +820,7 @@ def test_runtime_or_collection_violation(tmp_path, options):
 
 
 def load_diagnostic():
-    path = ROOT / "scripts/ci/ppu_device_probe.py"
+    path = ROOT / "scripts/ci/ppu_ops_probe.py"
     assert path.is_file(), "缺少独立设备诊断入口"
     return load(path)
 

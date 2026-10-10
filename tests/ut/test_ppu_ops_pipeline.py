@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""CPU contracts for the manual device pipeline, aggregation, and future gate truth tables."""
+"""CPU contracts for the manual PPU operator pipeline, aggregation, and future gate truth tables."""
 
 from __future__ import annotations
 
@@ -19,10 +19,78 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        ".github/workflows/_ppu-ops-tests.yaml",
+        "scripts/ci/ppu_ops_environment.json",
+        "scripts/ci/ppu_ops_probe.py",
+        "scripts/ci/ppu_ops_runner.py",
+        "scripts/ci/ppu_ops_select.py",
+        "scripts/ci/ppu_ops_test.sh",
+        "scripts/ci/ppu_ops_tests.json",
+        "tests/ut/test_ppu_ops_pipeline.py",
+        "tests/ut/test_ppu_ops_runner.py",
+        "tests/ut/test_ppu_ops_select.py",
+    ],
+)
+def test_ops_asset_names(relative_path):
+    assert (ROOT / relative_path).is_file(), relative_path
+
+
+def test_ops_assets_have_no_legacy_namespace():
+    legacy = re.compile(r"ppu[-_]dev" + r"ice[-_]")
+    violations = []
+    for directory in (".github/workflows", "scripts/ci"):
+        for path in sorted((ROOT / directory).iterdir()):
+            if path.is_file() and (
+                legacy.search(path.name) or legacy.search(path.read_text())
+            ):
+                violations.append(str(path.relative_to(ROOT)))
+    assert not violations, violations
+
+
+def test_ops_workflow_artifact_contract():
+    path = ROOT / ".github/workflows/_ppu-ops-tests.yaml"
+    assert path.is_file()
+    caller = yaml.safe_load(
+        (ROOT / ".github/workflows/build-ppu-wheels.yaml").read_text()
+    )
+    workflow = yaml.safe_load(path.read_text())
+    jobs = caller["jobs"]
+    selection = next(
+        step["with"]["name"]
+        for step in jobs["select-ops-tests"]["steps"]
+        if step.get("uses") == "actions/upload-artifact@v4"
+    )
+    assert (
+        selection == "ppu-ops-selection-${{ github.run_id }}-${{ github.run_attempt }}"
+    )
+    assert jobs["ops-tests"]["with"]["selection_artifact"] == selection
+    assert jobs["ops-tests"]["uses"] == "./.github/workflows/_ppu-ops-tests.yaml"
+    results = next(
+        step["with"]["name"]
+        for step in workflow["jobs"]["ops-tests"]["steps"]
+        if step.get("uses") == "actions/upload-artifact@v4"
+    )
+    assert results == (
+        "ppu-ops-results-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.group_id }}"
+    )
+    downloads = [
+        step["with"]
+        for step in workflow["jobs"]["ops-summary"]["steps"]
+        if step.get("uses") == "actions/download-artifact@v4"
+    ]
+    assert any(
+        step.get("pattern") == results.replace("${{ matrix.group_id }}", "*")
+        for step in downloads
+    )
+
+
 @pytest.fixture
 def runner():
-    path = ROOT / "scripts/ci/ppu_device_runner.py"
-    spec = importlib.util.spec_from_file_location("device_runner", path)
+    path = ROOT / "scripts/ci/ppu_ops_runner.py"
+    spec = importlib.util.spec_from_file_location("ppu_ops_runner", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -58,7 +126,7 @@ def test_gate_truth_table(runner, selector, mode, device, complete):
 
 @pytest.fixture
 def evidence(runner, tmp_path):
-    config = json.loads((ROOT / "scripts/ci/ppu_device_tests.json").read_bytes())
+    config = json.loads((ROOT / "scripts/ci/ppu_ops_tests.json").read_bytes())
     config["test_catalog"] = [
         {
             "id": "sample",
@@ -69,7 +137,7 @@ def evidence(runner, tmp_path):
         }
     ]
     config_bytes = json.dumps(config).encode()
-    env_bytes = (ROOT / "scripts/ci/ppu_device_environment.json").read_bytes()
+    env_bytes = (ROOT / "scripts/ci/ppu_ops_environment.json").read_bytes()
     image = "registry/image@sha256:" + "a" * 64
     fingerprint = dict(
         sdk_sha256="a" * 64,
@@ -279,7 +347,12 @@ def test_summary_cli_rejects_extra_partial_artifact(
 
 @pytest.mark.parametrize(
     "filename",
-    ["build-ppu-wheels.yaml", "e2e-ppu.yaml", "ppu-device-tests.yaml"],
+    [
+        "build-ppu-wheels.yaml",
+        "e2e-ppu.yaml",
+        "_ppu-ops-tests.yaml",
+        "ppu-diagnostics.yaml",
+    ],
 )
 def test_device_workflows_have_no_chinese_text(filename):
     text = (ROOT / ".github/workflows" / filename).read_text()
@@ -289,6 +362,75 @@ def test_device_workflows_have_no_chinese_text(filename):
         )
 
 
+@pytest.mark.parametrize("filename", ["build-ppu-wheels.yaml", "_ppu-ops-tests.yaml"])
+def test_device_workflows_do_not_expose_qualification_mode(filename):
+    text = (ROOT / ".github/workflows" / filename).read_text()
+    assert "qualification_mode" not in text.lower()
+
+
+def test_manual_ops_image_input_contract():
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/build-ppu-wheels.yaml").read_text()
+    )
+    inputs = workflow.get("on", workflow.get(True))["workflow_dispatch"]["inputs"]
+    assert "ops_image" in inputs
+    assert "device_image" not in inputs
+    assert inputs["ops_image"]["type"] == "string"
+    assert inputs["ops_image"]["default"] == ""
+    step = next(
+        s
+        for s in workflow["jobs"]["detect-ops-changes"]["steps"]
+        if s.get("id") == "detect"
+    )
+    assert step["env"]["OPS_IMAGE_OVERRIDE"] == "${{ inputs.ops_image }}"
+    assert "DEVICE_IMAGE_OVERRIDE" not in step["env"]
+
+
+def test_manual_detection_accepts_unapproved_environment(tmp_path, monkeypatch):
+    from scripts.ci import ppu_ops_select as selector
+
+    path = ROOT / ".github/workflows/build-ppu-wheels.yaml"
+    workflow = yaml.safe_load(path.read_text())
+    step = next(
+        s
+        for s in workflow["jobs"]["detect-ops-changes"]["steps"]
+        if s.get("id") == "detect"
+    )
+    script = step["run"].removeprefix("python - <<'PY'\n").removesuffix("PY\n")
+    image = "registry/image@sha256:" + "a" * 64
+    ops_image = "registry/ops@sha256:" + "b" * 64
+    output = tmp_path / "github-output"
+    environment_path = ROOT / "scripts/ci/ppu_ops_environment.json"
+    original_environment = environment_path.read_bytes()
+    assert json.loads(original_environment)["qualified"] is False
+    monkeypatch.chdir(ROOT)
+    monkeypatch.delenv("QUALIFICATION_MODE", raising=False)
+    monkeypatch.delenv("DEVICE_IMAGE_OVERRIDE", raising=False)
+    for name, value in {
+        "BUILD_IMAGE_OVERRIDE": image,
+        "OPS_IMAGE_OVERRIDE": ops_image,
+        "VLLM_REF_OVERRIDE": "c" * 40,
+        "GITHUB_SHA": "d" * 40,
+        "GITHUB_OUTPUT": str(output),
+    }.items():
+        monkeypatch.setenv(name, value)
+    write_json = selector.write_json
+    monkeypatch.setattr(
+        selector, "write_json", lambda p, value: write_json(tmp_path / p, value)
+    )
+    exec(compile(script, str(path), "exec"), {})
+    values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    assert values == {
+        "build_image": image,
+        "runtime_image": ops_image,
+        "expected_vllm_commit": "c" * 40,
+    }
+    assert json.loads((tmp_path / "changes.json").read_bytes())["tested_sha"] == (
+        "d" * 40
+    )
+    assert environment_path.read_bytes() == original_environment
+
+
 def test_manual_workflow_does_not_change_pr_gate():
     workflow = yaml.safe_load(
         (ROOT / ".github/workflows/build-ppu-wheels.yaml").read_text()
@@ -296,18 +438,18 @@ def test_manual_workflow_does_not_change_pr_gate():
     jobs = workflow["jobs"]
     assert jobs["gate"]["needs"] == ["build", "pin-unit-tests", "smoke"]
     assert "needs" not in jobs["build"]
-    assert "detect-device-changes" in jobs
-    assert "workflow_dispatch" in jobs["detect-device-changes"]["if"]
-    assert "existing_build_run_id" in jobs["detect-device-changes"]["if"]
+    assert "detect-ops-changes" in jobs
+    assert "workflow_dispatch" in jobs["detect-ops-changes"]["if"]
+    assert "existing_build_run_id" in jobs["detect-ops-changes"]["if"]
     assert "schedule" not in workflow.get(True, workflow.get("on", {}))
-    assert jobs["device-tests"]["uses"] == "./.github/workflows/ppu-device-tests.yaml"
+    assert jobs["ops-tests"]["uses"] == "./.github/workflows/_ppu-ops-tests.yaml"
     assert (
-        jobs["device-build"]["container"]["image"]
-        == "${{ needs.detect-device-changes.outputs.build_image }}"
+        jobs["ops-build"]["container"]["image"]
+        == "${{ needs.detect-ops-changes.outputs.build_image }}"
     )
     assert (
-        jobs["device-build"]["env"]["VLLM_SAIL_BUILD_IMAGE"]
-        == jobs["device-build"]["container"]["image"]
+        jobs["ops-build"]["env"]["VLLM_SAIL_BUILD_IMAGE"]
+        == jobs["ops-build"]["container"]["image"]
     )
 
 
@@ -324,7 +466,7 @@ def test_scheduler_names_retain_unique_group_suffix(runner, owner, run_id, attem
     names = runner.scheduler_names(groups, owner, run_id, attempt)
     normalized_owner = "t-head" if owner == "t-head" else "long-organization-na"
     assert names == [
-        f"ppu-{normalized_owner}-{run_id}-{attempt}-dev-{g['group_id']}" for g in groups
+        f"ppu-{normalized_owner}-{run_id}-{attempt}-ops-{g['group_id']}" for g in groups
     ]
     assert len(set(names)) == 2
     assert all(len(name) <= 52 for name in names)
@@ -352,12 +494,12 @@ def test_prepare_rejects_scheduler_name_truncation_before_nas(
 
 
 def test_reusable_workflow_contract():
-    path = ROOT / ".github/workflows/ppu-device-tests.yaml"
+    path = ROOT / ".github/workflows/_ppu-ops-tests.yaml"
     assert path.is_file(), "缺少 reusable workflow"
     workflow = yaml.safe_load(path.read_text())
     assert workflow["permissions"] == {"contents": "read", "actions": "read"}
     jobs = workflow["jobs"]
-    device = jobs["device-tests"]
+    device = jobs["ops-tests"]
     assert device["runs-on"] == "k8s-runner-group-cpu-thead"
     assert device["container"]["image"] == "${{ inputs.image }}"
     assert device["timeout-minutes"] == 90
@@ -370,7 +512,7 @@ def test_reusable_workflow_contract():
         "t-head/ppu-scheduler-action@a4e03cbbdb2624f4871fff30d7081b34cbc4b7d4"
     )
     assert scheduler["with"]["timeout_minutes"] == 60
-    assert scheduler["with"]["job_suffix"] == "dev-${{ matrix.group_id }}"
+    assert scheduler["with"]["job_suffix"] == "ops-${{ matrix.group_id }}"
     assert (
         scheduler["with"]["node_selector"]
         == "${{ steps.prepare.outputs.node_selector }}"
@@ -383,15 +525,15 @@ def test_reusable_workflow_contract():
     )
     assert all(s["with"]["retention-days"] == 14 for s in uploads)
     assert all("/wl_nas/devops/" in s["with"]["path"] for s in uploads)
-    assert jobs["device-summary"]["if"] == "always()"
+    assert jobs["ops-summary"]["if"] == "always()"
     assert "continue-on-error" not in path.read_text()
 
 
 @pytest.mark.parametrize(
     "filename,job_id",
     [
-        ("build-ppu-wheels.yaml", "device-build"),
-        ("ppu-device-tests.yaml", "device-tests"),
+        ("build-ppu-wheels.yaml", "ops-build"),
+        ("_ppu-ops-tests.yaml", "ops-tests"),
     ],
 )
 def test_container_checkout_uses_isolated_regular_git_config(
@@ -484,11 +626,11 @@ def test_container_checkout_uses_isolated_regular_git_config(
     assert global_config.read_text() == system_config.read_text() == original
 
 
-@pytest.mark.parametrize("job_id", ["device-tests", "device-summary"])
+@pytest.mark.parametrize("job_id", ["ops-tests", "ops-summary"])
 @pytest.mark.parametrize("override", [None, "https://packages.example/simple/"])
 def test_cpu_dependencies_use_explicit_test_index(job_id, override, tmp_path):
     workflow = yaml.safe_load(
-        (ROOT / ".github/workflows/ppu-device-tests.yaml").read_text()
+        (ROOT / ".github/workflows/_ppu-ops-tests.yaml").read_text()
     )
     assert (
         workflow["env"].get("SAIL_PIP_INDEX_URL")
@@ -529,14 +671,14 @@ def test_cpu_dependencies_use_explicit_test_index(job_id, override, tmp_path):
         "-r",
         "requirements/dev.txt",
     ]
-    assert commands[1][0] == "scripts/ci/ppu_device_runner.py"
+    assert commands[1][0] == "scripts/ci/ppu_ops_runner.py"
 
 
 def test_scheduler_forwards_test_index_without_changing_image():
     workflow = yaml.safe_load(
-        (ROOT / ".github/workflows/ppu-device-tests.yaml").read_text()
+        (ROOT / ".github/workflows/_ppu-ops-tests.yaml").read_text()
     )
-    device = workflow["jobs"]["device-tests"]
+    device = workflow["jobs"]["ops-tests"]
     scheduler = next(
         s for s in device["steps"] if "ppu-scheduler-action" in s.get("uses", "")
     )
@@ -553,8 +695,8 @@ def test_scheduler_forwards_test_index_without_changing_image():
 
 @pytest.fixture(
     params=[
-        ("ppu-device-tests.yaml", "device-tests"),
-        ("e2e-ppu.yaml", "device-probe"),
+        ("_ppu-ops-tests.yaml", "ops-tests"),
+        ("ppu-diagnostics.yaml", "device-probe"),
     ]
 )
 def worker_launch(request, tmp_path):
@@ -624,9 +766,9 @@ def test_worker_rejects_missing_allocation_before_python(
 
 def test_summary_does_not_inherit_container_git_config():
     workflow = yaml.safe_load(
-        (ROOT / ".github/workflows/ppu-device-tests.yaml").read_text()
+        (ROOT / ".github/workflows/_ppu-ops-tests.yaml").read_text()
     )
-    job = workflow["jobs"]["device-summary"]
+    job = workflow["jobs"]["ops-summary"]
     env = {**workflow.get("env", {}), **job.get("env", {})}
     assert "GIT_CONFIG_GLOBAL" not in env
     assert "GIT_CONFIG_NOSYSTEM" not in env
@@ -635,11 +777,11 @@ def test_summary_does_not_inherit_container_git_config():
 @pytest.mark.parametrize(
     "filename,job_id",
     [
-        ("build-ppu-wheels.yaml", "detect-device-changes"),
-        ("build-ppu-wheels.yaml", "device-build"),
-        ("build-ppu-wheels.yaml", "select-device-tests"),
-        ("ppu-device-tests.yaml", "device-tests"),
-        ("ppu-device-tests.yaml", "device-summary"),
+        ("build-ppu-wheels.yaml", "detect-ops-changes"),
+        ("build-ppu-wheels.yaml", "ops-build"),
+        ("build-ppu-wheels.yaml", "select-ops-tests"),
+        ("_ppu-ops-tests.yaml", "ops-tests"),
+        ("_ppu-ops-tests.yaml", "ops-summary"),
     ],
 )
 def test_device_checkout_is_bound_to_workflow_sha(filename, job_id):
@@ -658,15 +800,15 @@ def test_device_identity_cannot_be_overridden_by_reusable_input():
         (ROOT / ".github/workflows/build-ppu-wheels.yaml").read_text()
     )
     workflow = yaml.safe_load(
-        (ROOT / ".github/workflows/ppu-device-tests.yaml").read_text()
+        (ROOT / ".github/workflows/_ppu-ops-tests.yaml").read_text()
     )
     triggers = workflow.get(True, workflow.get("on", {}))
     assert "tested_sha" not in triggers["workflow_call"]["inputs"]
-    assert "tested_sha" not in caller["jobs"]["device-tests"]["with"]
+    assert "tested_sha" not in caller["jobs"]["ops-tests"]["with"]
     assert workflow["env"]["EXPECTED_SAIL_COMMIT"] == "${{ github.sha }}"
     scheduler = next(
         s
-        for s in workflow["jobs"]["device-tests"]["steps"]
+        for s in workflow["jobs"]["ops-tests"]["steps"]
         if "ppu-scheduler-action" in s.get("uses", "")
     )
     assert "EXPECTED_SAIL_COMMIT=${{ github.sha }}," in scheduler["with"]["extra_env"]

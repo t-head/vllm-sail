@@ -19,7 +19,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 _spec = importlib.util.spec_from_file_location(
-    "ppu_device_runner", Path(__file__).with_name("ppu_device_runner.py")
+    "ppu_ops_runner", Path(__file__).with_name("ppu_ops_runner.py")
 )
 runner = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(runner)
@@ -70,11 +70,11 @@ def verify_inputs(env):
     path = Path(env["SELECTION_FILE"])
     raw = path.read_bytes()
     original = json.loads(raw)
-    config_raw = path.with_name("ppu_device_tests.json").read_bytes()
-    environment_raw = path.with_name("ppu_device_environment.json").read_bytes()
+    config_raw = path.with_name("ppu_ops_tests.json").read_bytes()
+    environment_raw = path.with_name("ppu_ops_environment.json").read_bytes()
     for name, content in (
-        ("ppu_device_tests.json", config_raw),
-        ("ppu_device_environment.json", environment_raw),
+        ("ppu_ops_tests.json", config_raw),
+        ("ppu_ops_environment.json", environment_raw),
     ):
         runner.require(
             content == (ROOT / "scripts/ci" / name).read_bytes(),

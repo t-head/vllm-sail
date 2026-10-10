@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""CPU regressions for the device test-selection protocol, without importing device packages."""
+"""CPU regressions for the PPU operator test-selection protocol, without importing device packages."""
 
 from __future__ import annotations
 
@@ -13,9 +13,9 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-CONFIG = ROOT / "scripts/ci/ppu_device_tests.json"
-ENVIRONMENT = ROOT / "scripts/ci/ppu_device_environment.json"
-SCRIPT = ROOT / "scripts/ci/ppu_device_select.py"
+CONFIG = ROOT / "scripts/ci/ppu_ops_tests.json"
+ENVIRONMENT = ROOT / "scripts/ci/ppu_ops_environment.json"
+SCRIPT = ROOT / "scripts/ci/ppu_ops_select.py"
 OPTIONS = dict(diff_complete=True, force_full=False, environment_matches=True)
 
 
@@ -26,7 +26,7 @@ def test_selector_entrypoint_exists():
 @pytest.fixture
 def selector():
     assert SCRIPT.is_file(), "缺少设备选择器"
-    spec = importlib.util.spec_from_file_location("ppu_device_select", SCRIPT)
+    spec = importlib.util.spec_from_file_location("ppu_ops_select", SCRIPT)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module

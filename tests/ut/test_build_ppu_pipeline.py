@@ -92,7 +92,7 @@ def test_build_workflow_uses_script_and_retains_artifacts() -> None:
     import yaml
 
     jobs = yaml.safe_load(text)["jobs"]
-    for job in ("build", "device-build"):
+    for job in ("build", "ops-build"):
         uploads = {
             step["with"]["name"]: step["with"]
             for step in jobs[job]["steps"]
@@ -107,12 +107,12 @@ def test_build_workflow_uses_script_and_retains_artifacts() -> None:
             uploads["ppu-wheels-${{ github.run_id }}"]["if-no-files-found"] == "error"
         )
     for job, name in (
-        ("detect-device-changes", "changes"),
-        ("select-device-tests", "selection"),
+        ("detect-ops-changes", "changes"),
+        ("select-ops-tests", "selection"),
     ):
         assert any(
             step.get("with", {}).get("name")
-            == f"ppu-device-{name}-${{{{ github.run_id }}}}-${{{{ github.run_attempt }}}}"
+            == f"ppu-ops-{name}-${{{{ github.run_id }}}}-${{{{ github.run_attempt }}}}"
             for step in jobs[job]["steps"]
         )
     assert "if-no-files-found: error" in text

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Explicit device test selection, config validation, and cumulative Git diffs using only the standard library."""
+"""Explicit PPU operator test selection, config validation, and cumulative Git diffs using only the standard library."""
 
 from __future__ import annotations
 
