@@ -270,13 +270,15 @@ jobs:
             marker: ""
             timeout: 60
           # --- 810E models (offline LLM, TP=16 derived from chip profile)
+          # 240min: tests/e2e/models now runs 4 large MoE models serially
+          # (qwen3_next/deepseek_v4/minimax_m3/kimi_k3).
           - chip: 810e
             board: OAM-810E
             nproc: 16
             suite: models
             test_path: ${{ needs.prepare.outputs.offline_test_path }}
             marker: ${{ needs.prepare.outputs.offline_marker }}
-            timeout: 90
+            timeout: 240
           # --- 890P models (offline LLM, TP=8 derived from chip profile)
           - chip: 890p
             board: OAM-890P
@@ -284,7 +286,7 @@ jobs:
             suite: models
             test_path: ${{ needs.prepare.outputs.offline_test_path }}
             marker: ${{ needs.prepare.outputs.offline_marker }}
-            timeout: 90
+            timeout: 240
     steps:
       - name: Disable internal GitHub mirror rewrite
         shell: bash

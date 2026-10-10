@@ -6,7 +6,37 @@
     "board": "OAM-810E",
     "tp": 2,
     "extra_serve_flags": "--trust-remote-code",
-    "offline_test_path": "tests/e2e/models",
+    "offline_test_path": "tests/e2e/models/test_model_qwen3_next.py",
+    "offline_marker": "model_e2e"
+  },
+  {
+    "key": "deepseek-v4",
+    "checkpoint": "/nas_aisw/datasets/checkpoints/LLM/DeepSeek/v4/DeepSeek-V4",
+    "served_name": "deepseek-v4",
+    "board": "OAM-810E",
+    "tp": 16,
+    "extra_serve_flags": "--trust-remote-code",
+    "offline_test_path": "tests/e2e/models/test_model_deepseek_v4.py",
+    "offline_marker": "model_e2e"
+  },
+  {
+    "key": "minimax-m3",
+    "checkpoint": "/nas_aisw/datasets/checkpoints/LLM/MiniMax/m3/MiniMax-M3",
+    "served_name": "minimax-m3",
+    "board": "OAM-810E",
+    "tp": 16,
+    "extra_serve_flags": "--trust-remote-code",
+    "offline_test_path": "tests/e2e/models/test_model_minimax_m3.py",
+    "offline_marker": "model_e2e"
+  },
+  {
+    "key": "kimi-k3",
+    "checkpoint": "/nas_aisw/datasets/checkpoints/LLM/Moonshot/v3/Kimi-K3",
+    "served_name": "kimi-k3",
+    "board": "OAM-810E",
+    "tp": 16,
+    "extra_serve_flags": "--trust-remote-code",
+    "offline_test_path": "tests/e2e/models/test_model_kimi_k3.py",
     "offline_marker": "model_e2e"
   }
 ]

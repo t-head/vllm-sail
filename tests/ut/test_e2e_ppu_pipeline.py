@@ -91,6 +91,54 @@ def test_selector_cli_emits_github_output_matrix(tmp_path: Path) -> None:
     assert "include" in payload and payload["include"]
 
 
+def test_selector_cli_scalar_outputs_guard_single_model_dispatch() -> None:
+    """Scalar CLI outputs must narrow correctly for the offline model lane.
+
+    Single-model dispatch exports VLLM_SAIL_MODEL_ROOT from ``model_root``, so
+    ``offline_test_path`` must be one model's test file -- a directory would
+    collect every model test and run (and with update_golden, re-golden) all
+    of them against the single override checkpoint. The nightly (empty input)
+    multi-model matrix must instead leave ``model_root`` empty and keep the
+    directory default so each test resolves its own hard-coded checkpoint.
+    """
+
+    def _scalars(models: str) -> dict:
+        result = subprocess.run(
+            ["python3", str(SELECT), models],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        out = {}
+        for ln in result.stdout.splitlines():
+            key, sep, value = ln.partition("=")
+            if sep and key != "matrix":
+                out[key] = value
+        return out
+
+    # Nightly default: 4-model matrix, no global override, directory path.
+    nightly = _scalars("")
+    assert nightly["model_root"] == ""
+    assert nightly["offline_test_path"] == "tests/e2e/models"
+    assert nightly["offline_marker"] == "model_e2e"
+
+    # Single-model dispatch: own test file + non-empty checkpoint override.
+    catalog = json.loads(MODELS.read_text())
+    expected = {entry["key"]: entry for entry in catalog}
+    qwen = _scalars("qwen3.8-27b")
+    assert qwen["offline_test_path"].endswith(".py")
+    assert "test_model_qwen3_next" in qwen["offline_test_path"]
+    assert qwen["model_root"] == expected["qwen3.8-27b"]["checkpoint"]
+    assert qwen["model_root"]
+
+    # Every catalog key narrows to its own file and checkpoint.
+    for key, entry in expected.items():
+        out = _scalars(key)
+        assert out["offline_test_path"] == entry["offline_test_path"], key
+        assert out["offline_test_path"].endswith(".py"), key
+        assert out["model_root"] == entry["checkpoint"], key
+
+
 # --- pod smoke script ---------------------------------------------------------
 
 

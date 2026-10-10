@@ -133,6 +133,14 @@ class ModelConfig:
     max_tokens: int = DEFAULT_MAX_TOKENS
     logprobs: int = DEFAULT_LOGPROBS
     prompt_logprobs: int = DEFAULT_PROMPT_LOGPROBS
+    #: Per-model golden logprob tolerance. Defaults reproduce the module-wide
+    #: ``GOLDEN_LOGPROB_ATOL`` / ``GOLDEN_LOGPROB_RTOL`` so a model that needs
+    #: nothing special compares exactly like before; a model with known numeric
+    #: drift (e.g. Kimi K3 linear attention accumulating error over long
+    #: sequences) may relax them locally without touching the shared constants
+    #: or any other model's golden.
+    logprob_atol: float = GOLDEN_LOGPROB_ATOL
+    logprob_rtol: float = GOLDEN_LOGPROB_RTOL
     env: Mapping[str, str] = field(default_factory=dict)
     extra_llm_kwargs: Mapping[str, Any] = field(default_factory=dict)
 
@@ -253,7 +261,9 @@ def run_inference(
     return InferenceResult(prompts=prompt_list, cases=cases)
 
 
-def _fixed_param_snapshot() -> dict[str, Any]:
+def _fixed_param_snapshot(
+    atol: float = GOLDEN_LOGPROB_ATOL, rtol: float = GOLDEN_LOGPROB_RTOL
+) -> dict[str, Any]:
     """Record the fixed knobs + tolerance inside every golden for traceability."""
     return {
         "max_model_len": DEFAULT_MAX_MODEL_LEN,
@@ -266,7 +276,7 @@ def _fixed_param_snapshot() -> dict[str, Any]:
         "max_tokens": DEFAULT_MAX_TOKENS,
         "logprobs": DEFAULT_LOGPROBS,
         "prompt_logprobs": DEFAULT_PROMPT_LOGPROBS,
-        "tolerance": {"atol": GOLDEN_LOGPROB_ATOL, "rtol": GOLDEN_LOGPROB_RTOL},
+        "tolerance": {"atol": atol, "rtol": rtol},
     }
 
 
@@ -294,12 +304,18 @@ def _case_to_json(case: CaseResult) -> dict[str, Any]:
     }
 
 
-def _record_to_json(outputs: InferenceResult, golden_path: Path, chip: str) -> dict:
+def _record_to_json(
+    outputs: InferenceResult,
+    golden_path: Path,
+    chip: str,
+    atol: float = GOLDEN_LOGPROB_ATOL,
+    rtol: float = GOLDEN_LOGPROB_RTOL,
+) -> dict:
     return {
         "schema_version": SCHEMA_VERSION,
         "model": _model_from_path(golden_path, chip),
         "chip": chip,
-        "fixed_params": _fixed_param_snapshot(),
+        "fixed_params": _fixed_param_snapshot(atol, rtol),
         "prompts": list(outputs.prompts),
         "cases": [_case_to_json(case) for case in outputs.cases],
     }
@@ -320,7 +336,10 @@ def _assert_chip(expected: Mapping[str, Any], chip: str, golden_path: Path) -> N
 
 
 def _logprob_deviation(
-    actual: Mapping[str, Any], expected: Mapping[str, Any]
+    actual: Mapping[str, Any],
+    expected: Mapping[str, Any],
+    atol: float = GOLDEN_LOGPROB_ATOL,
+    rtol: float = GOLDEN_LOGPROB_RTOL,
 ) -> tuple[float, list[str]]:
     """Return (max deviation, violations) comparing two JSON logprob mappings."""
     max_dev = 0.0
@@ -332,7 +351,7 @@ def _logprob_deviation(
         actual_lp = actual[token_id]
         deviation = abs(actual_lp - expected_lp)
         max_dev = max(max_dev, deviation)
-        allowed = GOLDEN_LOGPROB_ATOL + GOLDEN_LOGPROB_RTOL * abs(expected_lp)
+        allowed = atol + rtol * abs(expected_lp)
         if deviation > allowed:
             violations.append(
                 f"token {token_id}: actual={actual_lp:.6f} expected={expected_lp:.6f} "
@@ -346,6 +365,8 @@ def _compare_steps(
     expected_steps: Sequence[Mapping[str, Any]],
     label: str,
     case_index: int,
+    atol: float = GOLDEN_LOGPROB_ATOL,
+    rtol: float = GOLDEN_LOGPROB_RTOL,
 ) -> tuple[float, list[str]]:
     max_dev = 0.0
     problems: list[str] = []
@@ -357,7 +378,7 @@ def _compare_steps(
         return max_dev, problems
     for position in range(len(expected_steps)):
         deviation, violations = _logprob_deviation(
-            actual_steps[position], expected_steps[position]
+            actual_steps[position], expected_steps[position], atol, rtol
         )
         max_dev = max(max_dev, deviation)
         problems.extend(
@@ -366,7 +387,12 @@ def _compare_steps(
     return max_dev, problems
 
 
-def _compare_cases(record: Mapping[str, Any], expected: Mapping[str, Any]) -> float:
+def _compare_cases(
+    record: Mapping[str, Any],
+    expected: Mapping[str, Any],
+    atol: float = GOLDEN_LOGPROB_ATOL,
+    rtol: float = GOLDEN_LOGPROB_RTOL,
+) -> float:
     """Compare generated cases against the golden; return the max logprob deviation."""
     actual_cases = record["cases"]
     expected_cases = expected.get("cases", [])
@@ -389,7 +415,7 @@ def _compare_cases(record: Mapping[str, Any], expected: Mapping[str, Any]) -> fl
             )
         for kind in ("completion_logprobs", "prompt_logprobs"):
             deviation, step_problems = _compare_steps(
-                actual.get(kind, []), golden.get(kind, []), kind, index
+                actual.get(kind, []), golden.get(kind, []), kind, index, atol, rtol
             )
             max_dev = max(max_dev, deviation)
             problems.extend(step_problems)
@@ -398,8 +424,8 @@ def _compare_cases(record: Mapping[str, Any], expected: Mapping[str, Any]) -> fl
         detail = "\n  ".join(problems[:20])
         raise AssertionError(
             "golden comparison failed "
-            f"(max logprob deviation={max_dev:.3e}, atol={GOLDEN_LOGPROB_ATOL}, "
-            f"rtol={GOLDEN_LOGPROB_RTOL}); {len(problems)} problem(s):\n  {detail}"
+            f"(max logprob deviation={max_dev:.3e}, atol={atol}, "
+            f"rtol={rtol}); {len(problems)} problem(s):\n  {detail}"
         )
     return max_dev
 
@@ -409,6 +435,8 @@ def compare_golden(
     golden_path: Any,
     chip: str,
     update: bool = False,
+    atol: Any = None,
+    rtol: Any = None,
 ) -> str:
     """Compare ``outputs`` against the per-chip golden, or (re)write it.
 
@@ -416,9 +444,16 @@ def compare_golden(
     yet: written and flagged pending-review, not a failure) or ``"compared"``.
     Raises :class:`AssertionError` with the maximum logprob deviation when the
     comparison fails.
+
+    ``atol`` / ``rtol`` optionally override the module-wide logprob tolerance
+    for a single model (see :class:`ModelConfig`); ``None`` keeps the shared
+    ``GOLDEN_LOGPROB_ATOL`` / ``GOLDEN_LOGPROB_RTOL`` so existing callers are
+    unaffected.
     """
+    effective_atol = GOLDEN_LOGPROB_ATOL if atol is None else float(atol)
+    effective_rtol = GOLDEN_LOGPROB_RTOL if rtol is None else float(rtol)
     golden_path = Path(golden_path)
-    record = _record_to_json(outputs, golden_path, chip)
+    record = _record_to_json(outputs, golden_path, chip, effective_atol, effective_rtol)
 
     if update:
         _write_golden(record, golden_path)
@@ -435,5 +470,5 @@ def compare_golden(
 
     expected = json.loads(golden_path.read_text())
     _assert_chip(expected, chip, golden_path)
-    _compare_cases(record, expected)
+    _compare_cases(record, expected, effective_atol, effective_rtol)
     return "compared"

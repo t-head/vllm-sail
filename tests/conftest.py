@@ -190,6 +190,15 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         action="store_true",
         help="Rewrite performance baselines instead of asserting against them",
     )
+    parser.addoption(
+        "--baseline-root",
+        action="store",
+        default=None,
+        help=(
+            "Override the perf baseline root (default: tests/e2e/perf/baselines); "
+            "used by CI to read/write per-chip baseline JSON in a workspace dir"
+        ),
+    )
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -356,19 +365,48 @@ def offline_llm() -> Callable[..., Any]:
 
 
 @pytest.fixture(scope="session")
-def perf_baseline(request: pytest.FixtureRequest) -> dict[str, Any]:
-    """Placeholder perf-baseline handle; skipped without a real device.
+def perf_baseline(request: pytest.FixtureRequest) -> Iterator[dict[str, Any]]:
+    """Perf-baseline handle backed by ``tests/e2e/perf/_baseline_store``.
 
-    Provides the ``--update-baseline`` flag and a baseline root path. The
-    perf-phase agent will extend this with the real ``_baseline_store`` and
-    threshold configuration.
+    Skipped without a real device. Resolves the active chip key, the baseline
+    root (``--baseline-root`` override, else ``tests/e2e/perf/baselines``) and
+    the ``--update-baseline`` flag, then exposes a ``store(suite)`` factory that
+    returns one shared :class:`BaselineStore` per suite (so every metric of a
+    run accumulates in the same document). At session teardown each store is
+    persisted -- the first run on a chip writes its ``status="pending"``
+    baseline -- and, when ``VLLM_SAIL_PERF_REPORT_DIR`` is set, the comparison
+    report (``perf_report.json`` / ``perf_report.md``) is emitted for CI upload.
+    The store module is pure standard library and is imported lazily here, so
+    CPU-only collection never reaches it.
     """
     if not HAS_REAL_DEVICE:
         pytest.skip("requires a real PPU/CUDA device")
-    return {
-        "update": request.config.getoption("--update-baseline"),
-        "root": Path(__file__).parent / "e2e" / "perf" / "_baseline",
-    }
+    capability = _real_device_capability()
+    chip = _chip_for_capability(capability) if capability is not None else "810e"
+    override = request.config.getoption("--baseline-root")
+    root = (
+        Path(override)
+        if override
+        else Path(__file__).parent / "e2e" / "perf" / "baselines"
+    )
+    update = request.config.getoption("--update-baseline")
+
+    from tests.e2e.perf._baseline_store import BaselineStore
+
+    stores: dict[str, Any] = {}
+
+    def store(suite: str) -> Any:
+        if suite not in stores:
+            stores[suite] = BaselineStore(root, chip, suite, update=update)
+        return stores[suite]
+
+    yield {"update": update, "root": root, "chip": chip, "store": store}
+
+    report_dir = os.environ.get("VLLM_SAIL_PERF_REPORT_DIR")
+    for suite, baseline_store in stores.items():
+        baseline_store.save()
+        if report_dir:
+            baseline_store.emit(Path(report_dir) / suite)
 
 
 @pytest.fixture
