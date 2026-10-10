@@ -538,6 +538,77 @@ def test_scheduler_forwards_test_index_without_changing_image():
     )
 
 
+@pytest.fixture(
+    params=[
+        ("ppu-device-tests.yaml", "device-tests"),
+        ("e2e-ppu.yaml", "device-probe"),
+    ]
+)
+def worker_launch(request, tmp_path):
+    filename, job_id = request.param
+    workflow = yaml.safe_load((ROOT / ".github/workflows" / filename).read_text())
+    scheduler = next(
+        s
+        for s in workflow["jobs"][job_id]["steps"]
+        if "ppu-scheduler-action" in s.get("uses", "")
+    )
+    # 执行真实 worker 命令，仅在 Python 进程入口记录导出的环境，避免安装或使用设备。
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    python = bin_dir / "python"
+    python.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"${CUDA_VISIBLE_DEVICES-<unset>}\" "
+        '"${NVIDIA_VISIBLE_DEVICES-<unset>}" "$@"\n'
+    )
+    python.chmod(0o755)
+    command = scheduler["with"]["command"].replace(
+        "/workspace/source", shlex.quote(str(ROOT))
+    )
+
+    def launch(env):
+        return subprocess.run(
+            ["bash", "--noprofile", "--norc", "-c", command],
+            env={"PATH": str(bin_dir) + os.pathsep + os.defpath, **env},
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+    return launch
+
+
+@pytest.mark.parametrize("allocated", ["0", "2", "4", "15"])
+@pytest.mark.parametrize("existing_cuda", [None, "", "0"])
+def test_worker_exports_allocated_device_before_python(
+    worker_launch, allocated, existing_cuda
+):
+    env = {"NVIDIA_VISIBLE_DEVICES": allocated}
+    if existing_cuda is not None:
+        env["CUDA_VISIBLE_DEVICES"] = existing_cuda
+    result = worker_launch(env)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines()[:2] == [allocated, allocated]
+    assert result.stdout.splitlines()[-1] == "run"
+
+
+@pytest.mark.parametrize("allocated", [None, ""])
+@pytest.mark.parametrize("existing_cuda", [None, "0"])
+def test_worker_rejects_missing_allocation_before_python(
+    worker_launch, allocated, existing_cuda
+):
+    env = {}
+    if allocated is not None:
+        env["NVIDIA_VISIBLE_DEVICES"] = allocated
+    if existing_cuda is not None:
+        env["CUDA_VISIBLE_DEVICES"] = existing_cuda
+    result = worker_launch(env)
+    assert result.returncode != 0
+    assert "NVIDIA_VISIBLE_DEVICES" in result.stderr
+    assert result.stdout == "", "分配信息缺失时不应启动 Python"
+
+
 def test_summary_does_not_inherit_container_git_config():
     workflow = yaml.safe_load(
         (ROOT / ".github/workflows/ppu-device-tests.yaml").read_text()

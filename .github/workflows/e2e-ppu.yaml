@@ -266,7 +266,11 @@ jobs:
             host_ipc: true
             host_network: true
             shm_size: 8Gi
-          command: cd /workspace/source && python scripts/ci/ppu_device_probe.py run
+          # 与资格测试使用相同的 worker 设备绑定，诊断报告记录生效后的环境。
+          command: >-
+            cd /workspace/source &&
+            export CUDA_VISIBLE_DEVICES="${NVIDIA_VISIBLE_DEVICES:?未取得分配设备}" &&
+            python scripts/ci/ppu_device_probe.py run
       - name: 停止只读采集并等待证据落盘
         if: always()
         run: |

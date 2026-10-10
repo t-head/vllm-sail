@@ -117,7 +117,11 @@ jobs:
             host_ipc: true
             host_network: true
             shm_size: 8Gi
-          command: cd /workspace/source && bash scripts/ci/ppu_device_test.sh
+          # 在 worker 内读取分配卡号，并在启动 Python 前设置可见设备。
+          command: >-
+            cd /workspace/source &&
+            export CUDA_VISIBLE_DEVICES="${NVIDIA_VISIBLE_DEVICES:?未取得分配设备}" &&
+            bash scripts/ci/ppu_device_test.sh
       - name: 校验 NAS 回传并补充控制面计时
         if: always()
         env:
