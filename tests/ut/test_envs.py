@@ -8,6 +8,8 @@ import pytest
 from vllm_sail import envs
 
 BOOL_DEFAULTS = {
+    "MINIMAX_M3_MSA": False,
+    "MINIMAX_M3_MSA_ATTEND": True,
     "FUSED_RMSNORM_QUANT": False,
     "USE_OPT_TOKEN_GROUP_QUANT": False,
     "DENSE_BF16_DEEPGEMM": False,
@@ -35,6 +37,7 @@ def test_defaults_and_canonical_snapshot() -> None:
     expected = {f"VLLM_SAIL_{key}": value for key, value in BOOL_DEFAULTS.items()}
     expected.update({f"VLLM_SAIL_{key}": None for key in BACKENDS})
     expected["VLLM_DEEPEPLL_RECV_HOOK"] = True
+    expected["VLLM_SAIL_MINIMAX_M3_MSA_INDEXER_MEM_BUDGET_MB"] = 256
     assert envs.snapshot() == expected
     assert set(envs.environment_variables) == set(expected)
     for suffix in (*BOOL_DEFAULTS, *BACKENDS):
@@ -132,6 +135,18 @@ def test_shared_upstream_variable_keeps_its_name(
     monkeypatch.setenv("VLLM_DEEPEPLL_RECV_HOOK", "0")
     assert envs.VLLM_DEEPEPLL_RECV_HOOK is False
     assert envs.is_set("VLLM_DEEPEPLL_RECV_HOOK") is True
+
+
+def test_msa_memory_budget_alias_and_validation(monkeypatch):
+    suffix = "MINIMAX_M3_MSA_INDEXER_MEM_BUDGET_MB"
+    monkeypatch.setenv(f"VLLM_PPU_{suffix}", "32")
+    assert getattr(envs, f"VLLM_SAIL_{suffix}") == 32
+    monkeypatch.setenv(f"VLLM_SAIL_{suffix}", "64")
+    assert getattr(envs, f"VLLM_PPU_{suffix}") == 64
+    for value in ("0", "-1", "garbage", ""):
+        monkeypatch.setenv(f"VLLM_SAIL_{suffix}", value)
+        with pytest.raises(ValueError, match="positive integer"):
+            getattr(envs, f"VLLM_PPU_{suffix}")
 
 
 def test_choice_helper_supports_unregistered_names(

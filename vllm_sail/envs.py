@@ -30,6 +30,9 @@ from typing import TYPE_CHECKING, Any
 # also why vllm's own envs.py guards its declarations the same way.)
 # ---------------------------------------------------------------------------
 if TYPE_CHECKING:
+    VLLM_SAIL_MINIMAX_M3_MSA: bool = False
+    VLLM_SAIL_MINIMAX_M3_MSA_ATTEND: bool = True
+    VLLM_SAIL_MINIMAX_M3_MSA_INDEXER_MEM_BUDGET_MB: int = 256
     VLLM_SAIL_FUSED_RMSNORM_QUANT: bool = False
     VLLM_SAIL_USE_OPT_TOKEN_GROUP_QUANT: bool = False
     VLLM_SAIL_DENSE_BF16_DEEPGEMM: bool = False
@@ -48,6 +51,9 @@ if TYPE_CHECKING:
     VLLM_DEEPEPLL_RECV_HOOK: bool = True
 
     # Backward-compatible Python attributes; all reads resolve SAIL first.
+    VLLM_PPU_MINIMAX_M3_MSA: bool = False
+    VLLM_PPU_MINIMAX_M3_MSA_ATTEND: bool = True
+    VLLM_PPU_MINIMAX_M3_MSA_INDEXER_MEM_BUDGET_MB: int = 256
     VLLM_PPU_FUSED_RMSNORM_QUANT: bool = False
     VLLM_PPU_USE_OPT_TOKEN_GROUP_QUANT: bool = False
     VLLM_PPU_DENSE_BF16_DEEPGEMM: bool = False
@@ -116,7 +122,26 @@ def _choice(
     return _get
 
 
+def _positive_int(name: str, default: int) -> Callable[[], int]:
+    def _get() -> int:
+        source, raw = _read_env(name)
+        try:
+            value = default if raw is None else int(raw)
+        except ValueError as exc:
+            raise ValueError(f"{source} must be a positive integer") from exc
+        if value <= 0:
+            raise ValueError(f"{source} must be a positive integer")
+        return value
+
+    return _get
+
+
 environment_variables: dict[str, Callable[[], Any]] = {
+    "VLLM_SAIL_MINIMAX_M3_MSA": _bool("VLLM_SAIL_MINIMAX_M3_MSA", False),
+    "VLLM_SAIL_MINIMAX_M3_MSA_ATTEND": _bool("VLLM_SAIL_MINIMAX_M3_MSA_ATTEND", True),
+    "VLLM_SAIL_MINIMAX_M3_MSA_INDEXER_MEM_BUDGET_MB": _positive_int(
+        "VLLM_SAIL_MINIMAX_M3_MSA_INDEXER_MEM_BUDGET_MB", 256
+    ),
     "VLLM_SAIL_FUSED_RMSNORM_QUANT": _bool("VLLM_SAIL_FUSED_RMSNORM_QUANT", False),
     "VLLM_SAIL_USE_OPT_TOKEN_GROUP_QUANT": _bool(
         "VLLM_SAIL_USE_OPT_TOKEN_GROUP_QUANT", False
