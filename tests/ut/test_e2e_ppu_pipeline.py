@@ -249,16 +249,26 @@ def test_e2e_workflow_is_reusable_and_manual_and_uses_cpu_runner() -> None:
     assert "actions: read" in text
 
 
-def test_e2e_workflow_exposes_smoke_and_accuracy_jobs() -> None:
+def test_e2e_workflow_exposes_smoke_offline_and_accuracy_jobs() -> None:
     text = WORKFLOW.read_text()
     workflow = yaml.safe_load(text)
     trigger = workflow.get("on", workflow.get(True))
-    assert set(trigger) == {"workflow_call", "workflow_dispatch"}
-    for event in trigger.values():
-        assert set(event["inputs"]) == {"build_run_id", "models", "image"}
-    assert set(workflow["jobs"]) == {"prepare", "e2e", "accuracy"}
+    assert set(trigger) == {"workflow_call", "workflow_dispatch", "schedule"}
+    assert set(trigger["workflow_call"]["inputs"]) == {
+        "build_run_id",
+        "models",
+        "image",
+    }
+    assert set(trigger["workflow_dispatch"]["inputs"]) == {
+        "build_run_id",
+        "models",
+        "image",
+        "update_golden",
+    }
+    assert set(workflow["jobs"]) == {"prepare", "smoke", "offline", "accuracy"}
     assert "if" not in workflow["jobs"]["prepare"]
-    assert workflow["jobs"]["e2e"]["needs"] == "prepare"
+    assert workflow["jobs"]["smoke"]["needs"] == "prepare"
+    assert workflow["jobs"]["offline"]["needs"] == "prepare"
     accuracy = workflow["jobs"]["accuracy"]
     assert accuracy["needs"] == "prepare"
     matrix = accuracy["strategy"]["matrix"]["include"]
@@ -287,10 +297,10 @@ def test_e2e_workflow_pulls_wheels_by_run_id() -> None:
     # workflow_call/workflow_dispatch still accept the build_run_id input.
     assert "build_run_id:" in text
     assert "actions/download-artifact@v4" in text
-    # PR3 keeps the required caller input contract. Both smoke and accuracy
-    # download the exact wheel artifact selected by the caller.
-    assert text.count("run-id: ${{ inputs.build_run_id }}") == 2
-    assert text.count("ppu-wheels-${{ inputs.build_run_id }}") == 2
+    # Deferred nightly wiring resolves the supplied or latest successful run in
+    # prepare, and all three device jobs download that resolved wheel artifact.
+    assert text.count("run-id: ${{ needs.prepare.outputs.build_run_id }}") == 3
+    assert text.count("ppu-wheels-${{ needs.prepare.outputs.build_run_id }}") == 3
 
 
 def test_e2e_workflow_keeps_python_frontend_and_privileged() -> None:
