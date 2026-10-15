@@ -15,7 +15,7 @@ on:
       models:
         description: Comma-separated model catalog keys
         type: string
-        default: qwen3.8-27b
+        default: qwen3.8-flash-next
       image:
         description: SAIL runtime image
         type: string
@@ -29,7 +29,7 @@ on:
       models:
         description: Comma-separated catalog keys to run (blank = every model in scripts/ci/ppu_e2e_models.json)
         required: false
-        default: qwen3.8-27b
+        default: qwen3.8-flash-next
         type: string
       image:
         description: Runtime container image the PPU pod runs
@@ -164,3 +164,89 @@ jobs:
             host_network: true
             shm_size: 32Gi
           command: cd /workspace/source && bash scripts/ci/ppu_e2e_smoke.sh
+
+  accuracy:
+    name: Accuracy ${{ matrix.model_key }}
+    needs: prepare
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: k8s-runner-group-cpu-thead
+    timeout-minutes: 120
+    container:
+      image: ${{ inputs.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - model_key: deepseek_v4_int8
+            board: OAM-810E
+            ppu_count: 8
+          - model_key: deepseek_v4_mxfp4
+            board: OAM-890P
+            ppu_count: 8
+          - model_key: minimax-m3-fp8
+            board: OAM-890P
+            ppu_count: 8
+          - model_key: qwen3.8-flash-next
+            board: OAM-890P
+            ppu_count: 8
+    steps:
+      - name: Disable internal GitHub mirror rewrite
+        shell: bash
+        run: |
+          for scope in system global; do
+            git config --${scope} --get-regexp '^url\..*\.insteadof$' 2>/dev/null || true
+            while IFS= read -r section; do
+              [ -n "${section}" ] || continue
+              git config --${scope} --unset-all "${section}.insteadOf" 2>/dev/null || true
+            done < <(git config --${scope} --get-regexp '^url\..*\.insteadof$' 2>/dev/null | awk '$2 ~ /github\.com/ {sub(/\.insteadof$/, "", $1); print $1}')
+          done
+
+      - name: Check out vLLM SAIL
+        uses: actions/checkout@v4
+        with:
+          github-server-url: https://github.com
+
+      - name: Download CI-built wheels
+        uses: actions/download-artifact@v4
+        with:
+          name: ppu-wheels-${{ inputs.build_run_id }}
+          path: wheels
+          run-id: ${{ inputs.build_run_id }}
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+
+      - name: Verify wheel manifest
+        shell: bash
+        run: python scripts/ci/ppu_wheel_manifest.py verify wheels
+
+      - name: Run GSM8K accuracy E2E
+        uses: t-head/ppu-scheduler-action@main
+        with:
+          image: ${{ inputs.image }}
+          nnodes: 0
+          nproc_per_node: ${{ matrix.ppu_count }}
+          namespace: ppu-sched
+          node_selector: board-type=${{ matrix.board }}
+          timeout_minutes: 90
+          cleanup_policy: always
+          job_suffix: accuracy-${{ matrix.model_key }}
+          source_dir: /workspace/source
+          artifact_paths: wheels/**
+          extra_env: MODEL_KEY=${{ matrix.model_key }},WHEELS_DIR=/workspace/source/wheels,RESULTS_DIR=/mnt/wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/e2e-accuracy-${{ matrix.model_key }},VLLM_USE_RUST_FRONTEND=0,VLLM_USE_RUST_BENCH=0
+          container_options: |
+            privileged: true
+            host_ipc: true
+            host_network: true
+            shm_size: 32Gi
+          command: cd /workspace/source && bash scripts/ci/ppu_e2e_accuracy.sh
+
+      - name: Upload accuracy artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ppu-e2e-accuracy-${{ matrix.model_key }}-${{ github.run_id }}
+          path: |
+            /wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/e2e-accuracy-${{ matrix.model_key }}/*.log
+            /wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/e2e-accuracy-${{ matrix.model_key }}/golden/*.json
+          if-no-files-found: warn
+          retention-days: 14
