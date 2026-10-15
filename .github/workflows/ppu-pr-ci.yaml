@@ -1,0 +1,86 @@
+name: PPU PR CI
+run-name: PPU PR ${{ inputs.pr_number }} head ${{ inputs.head_sha }} request ${{ inputs.request_check_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Authorized PR number
+        required: true
+        type: string
+      head_sha:
+        description: Bound PR head SHA
+        required: true
+        type: string
+      base_sha:
+        description: Bound PR base SHA
+        required: true
+        type: string
+      request_check_id:
+        description: Trusted request check ID
+        required: true
+        type: string
+
+permissions: {}
+cache-mode: none
+
+concurrency:
+  group: ppu-on-demand-pr-${{ inputs.pr_number }}
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  reject-native-rerun:
+    if: github.run_attempt != 1
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - run: |
+          echo 'Native Re-run is unsupported for on-demand PPU CI. Use /ci retry.'
+          exit 1
+
+  validate:
+    if: >-
+      github.run_attempt == 1 && github.repository == 't-head/vllm-sail' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: ppu-control-pr-${{ inputs.pr_number }}
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      checks: write
+    outputs:
+      execution_plan: ${{ steps.validate.outputs.execution_plan }}
+      head_sha: ${{ steps.validate.outputs.head_sha }}
+      pr_number: ${{ steps.validate.outputs.pr_number }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Validate the immutable request before scheduling PPU jobs
+        id: validate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          CI_TRUSTED_USERS: ${{ vars.CI_TRUSTED_USERS }}
+        run: python -m scripts.ci.ppu_ci_command validate
+
+  ppu:
+    if: github.run_attempt == 1
+    name: PPU
+    needs: validate
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/build-ppu-wheels.yaml
+    with:
+      execution_plan: ${{ needs.validate.outputs.execution_plan }}
+      pr_mode: true
+      pr_number: ${{ needs.validate.outputs.pr_number }}
+      pr_head_sha: ${{ needs.validate.outputs.head_sha }}

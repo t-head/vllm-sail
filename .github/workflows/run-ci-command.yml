@@ -1,0 +1,69 @@
+name: PPU CI command
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions: {}
+cache-mode: none
+
+jobs:
+  classify:
+    if: github.repository == 't-head/vllm-sail' && github.event.issue.pull_request
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      kind: ${{ steps.classify.outputs.kind }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - id: classify
+        run: python -m scripts.ci.ppu_ci_command classify
+
+  help:
+    needs: classify
+    if: needs.classify.outputs.kind == 'help'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: python -m scripts.ci.ppu_ci_command help
+
+  command:
+    needs: classify
+    if: needs.classify.outputs.kind == 'command'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: ppu-control-pr-${{ github.event.issue.number }}
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: write
+      checks: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Process an exact CI command
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          CI_TRUSTED_USERS: ${{ vars.CI_TRUSTED_USERS }}
+        run: python -m scripts.ci.ppu_ci_command command

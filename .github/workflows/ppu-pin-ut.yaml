@@ -3,6 +3,22 @@ name: PPU pin unit tests
 on:
   workflow_call:
     inputs:
+      execution_plan:
+        description: Hosted validator run-bound execution plan
+        type: string
+        default: ""
+      build_artifact_id:
+        description: Validated immutable wheel artifact ID
+        type: string
+        default: ""
+      pr_mode:
+        description: Enforce PR artifact identity for on-demand execution
+        type: boolean
+        default: false
+      pr_head_sha:
+        description: Validated immutable PR head SHA
+        type: string
+        default: ""
       build_run_id:
         description: PPU CI build run supplying ppu-wheels-<run_id>
         required: true
@@ -12,12 +28,18 @@ on:
         type: string
         default: reg.docker.alibaba-inc.com/ai-tmp/llm@sha256:24872709b1a84ec0e91260eeeccf6ae7ba52a6c70fb90f55a7aae1c1df503bcb
 
+cache-mode: none
+
 permissions:
   contents: read
   actions: read
 
 jobs:
   pin-unit-tests:
+    if: >-
+      !inputs.pr_mode || (github.run_attempt == 1 && inputs.build_artifact_id > 0 &&
+      fromJSON(inputs.execution_plan).run_id == github.run_id &&
+      fromJSON(inputs.execution_plan).plan.pin.mode == 'run')
     name: main-verified
     runs-on: k8s-runner-group-cpu-thead
     timeout-minutes: 30
@@ -51,15 +73,34 @@ jobs:
           echo "=== insteadOf after (global) ==="
           git config --global --get-regexp '^url\..*\.insteadof$' 2>/dev/null || echo none
 
+      - name: Require disabled cache access
+        uses: actions/github-script@v7
+        with:
+          script: |
+            if (process.env.ACTIONS_CACHE_MODE !== 'none') {
+              throw new Error('Actions cache access must be disabled');
+            }
+            console.log('Cache access verified: none');
+
       - name: Check out vLLM SAIL
         uses: actions/checkout@v4
         with:
           github-server-url: https://github.com
+          ref: ${{ inputs.pr_head_sha || github.sha }}
+          persist-credentials: false
+
+      - name: Verify the checked-out revision
+        shell: bash
+        env:
+          EXPECTED_SAIL_SHA: ${{ inputs.pr_head_sha || github.sha }}
+        run: test "$(git -c "safe.directory=$(pwd -P)" rev-parse HEAD)" = "$EXPECTED_SAIL_SHA"
 
       - name: Download CI-built wheels
         uses: actions/download-artifact@v4
         with:
-          name: ppu-wheels-${{ inputs.build_run_id }}
+          name: ${{ !inputs.pr_mode && format('ppu-wheels-{0}', inputs.build_run_id) || '' }}
+          artifact-ids: ${{ inputs.pr_mode && inputs.build_artifact_id || '' }}
+          merge-multiple: true
           path: ${{ env.WHEELS_DIR }}
           run-id: ${{ inputs.build_run_id }}
           repository: ${{ github.repository }}
@@ -68,7 +109,8 @@ jobs:
       - name: Verify wheel manifest and pin
         id: manifest
         env:
-          REQUIRE_PR_ARTIFACT: ${{ github.event_name == 'pull_request' }}
+          REQUIRE_PR_ARTIFACT: ${{ inputs.pr_mode || github.event_name == 'pull_request' }}
+          EXPECTED_SAIL_SHA: ${{ inputs.pr_head_sha || github.sha }}
         run: |
           python scripts/ci/ppu_wheel_manifest.py verify "${WHEELS_DIR}"
           python - <<'PYTHON'
@@ -88,7 +130,7 @@ jobs:
               # PR gating must fail closed; a manual reuse may skip a different pin.
               subprocess.run(
                   ["python", "scripts/ci/ppu_wheel_manifest.py", "verify", os.environ["WHEELS_DIR"],
-                   "--vllm-commit", expected, "--sail-commit", os.environ["GITHUB_SHA"]],
+                   "--vllm-commit", expected, "--sail-commit", os.environ["EXPECTED_SAIL_SHA"]],
                   check=True,
               )
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
@@ -127,7 +169,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ppu-pin-main-verified-${{ github.run_id }}
+          name: ppu-pin-main-verified-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             /wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/pin-ut-main-verified/*.log
             /wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/pin-ut-main-verified/pin-ut.xml

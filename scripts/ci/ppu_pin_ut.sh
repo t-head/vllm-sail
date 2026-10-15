@@ -26,7 +26,9 @@ python "${ROOT_DIR}/scripts/ci/ppu_image_stack.py" prepare \
 python -m pip install --no-deps --force-reinstall \
     "${WHEELS_DIR}"/vllm/*.whl "${WHEELS_DIR}"/vllm-sail/*.whl
 PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
-    python -m pip install -r "${ROOT_DIR}/requirements/dev.txt"
+    python -m pip install --only-binary=nodejs-wheel-binaries -r "${ROOT_DIR}/requirements/dev.txt"
+# Verify the test runtime inside this worker, not the outer Actions runner.
+python -m nodejs_wheel --version
 python "${ROOT_DIR}/scripts/ci/ppu_image_stack.py" verify \
     --sdk /usr/local/PPU_SDK --output "${UT_RESULTS_DIR}/image-stack.json"
 

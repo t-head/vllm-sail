@@ -8,6 +8,22 @@ name: E2E PPU smoke
 on:
   workflow_call:
     inputs:
+      execution_plan:
+        description: Hosted validator run-bound execution plan
+        type: string
+        default: ""
+      build_artifact_id:
+        description: Validated immutable wheel artifact ID
+        type: string
+        default: ""
+      pr_mode:
+        description: Enforce PR artifact identity for on-demand execution
+        type: boolean
+        default: false
+      pr_head_sha:
+        description: Validated immutable PR head SHA
+        type: string
+        default: ""
       build_run_id:
         description: Run supplying the ppu-wheels artifact
         required: true
@@ -37,6 +53,8 @@ on:
         default: reg.docker.alibaba-inc.com/ai-tmp/llm@sha256:24872709b1a84ec0e91260eeeccf6ae7ba52a6c70fb90f55a7aae1c1df503bcb
         type: string
 
+cache-mode: none
+
 permissions:
   contents: read
   # Downloading an artifact produced by another run needs the actions:read scope.
@@ -48,6 +66,10 @@ concurrency:
 
 jobs:
   prepare:
+    if: >-
+      !inputs.pr_mode || (github.run_attempt == 1 && inputs.build_artifact_id > 0 &&
+      fromJSON(inputs.execution_plan).run_id == github.run_id &&
+      fromJSON(inputs.execution_plan).plan.smoke.mode == 'run')
     name: Resolve model matrix
     runs-on: k8s-runner-group-cpu-thead
     timeout-minutes: 10
@@ -73,10 +95,27 @@ jobs:
             done < <(git config --${scope} --get-regexp '^url\..*\.insteadof$' 2>/dev/null | awk '$2 ~ /github\.com/ {sub(/\.insteadof$/, "", $1); print $1}')
           done
 
+      - name: Require disabled cache access
+        uses: actions/github-script@v7
+        with:
+          script: |
+            if (process.env.ACTIONS_CACHE_MODE !== 'none') {
+              throw new Error('Actions cache access must be disabled');
+            }
+            console.log('Cache access verified: none');
+
       - name: Check out vLLM SAIL
         uses: actions/checkout@v4
         with:
           github-server-url: https://github.com
+          ref: ${{ inputs.pr_head_sha || github.sha }}
+          persist-credentials: false
+
+      - name: Verify the checked-out revision
+        shell: bash
+        env:
+          EXPECTED_SAIL_SHA: ${{ inputs.pr_head_sha || github.sha }}
+        run: test "$(git -c "safe.directory=$(pwd -P)" rev-parse HEAD)" = "$EXPECTED_SAIL_SHA"
 
       - name: Select models
         id: select
@@ -88,6 +127,10 @@ jobs:
         run: python3 scripts/ci/ppu_e2e_select.py "${MODELS}" >> "$GITHUB_OUTPUT"
 
   e2e:
+    if: >-
+      !inputs.pr_mode || (github.run_attempt == 1 && inputs.build_artifact_id > 0 &&
+      fromJSON(inputs.execution_plan).run_id == github.run_id &&
+      fromJSON(inputs.execution_plan).plan.smoke.mode == 'run')
     name: E2E ${{ matrix.model.key }}
     needs: prepare
     runs-on: k8s-runner-group-cpu-thead
@@ -117,28 +160,49 @@ jobs:
             done < <(git config --${scope} --get-regexp '^url\..*\.insteadof$' 2>/dev/null | awk '$2 ~ /github\.com/ {sub(/\.insteadof$/, "", $1); print $1}')
           done
 
+      - name: Require disabled cache access
+        uses: actions/github-script@v7
+        with:
+          script: |
+            if (process.env.ACTIONS_CACHE_MODE !== 'none') {
+              throw new Error('Actions cache access must be disabled');
+            }
+            console.log('Cache access verified: none');
+
       - name: Check out vLLM SAIL
         uses: actions/checkout@v4
         with:
           github-server-url: https://github.com
+          ref: ${{ inputs.pr_head_sha || github.sha }}
+          persist-credentials: false
+
+      - name: Verify the checked-out revision
+        shell: bash
+        env:
+          EXPECTED_SAIL_SHA: ${{ inputs.pr_head_sha || github.sha }}
+        run: test "$(git -c "safe.directory=$(pwd -P)" rev-parse HEAD)" = "$EXPECTED_SAIL_SHA"
 
       - name: Download CI-built wheels
         uses: actions/download-artifact@v4
         with:
-          name: ppu-wheels-${{ inputs.build_run_id }}
+          name: ${{ !inputs.pr_mode && format('ppu-wheels-{0}', inputs.build_run_id) || '' }}
+          artifact-ids: ${{ inputs.pr_mode && inputs.build_artifact_id || '' }}
+          merge-multiple: true
           path: wheels
           run-id: ${{ inputs.build_run_id }}
           repository: ${{ github.repository }}
           github-token: ${{ github.token }}
 
       - name: Require the current PR artifact and verified upstream pin
-        if: github.event_name == 'pull_request'
+        if: inputs.pr_mode || github.event_name == 'pull_request'
         shell: bash
+        env:
+          EXPECTED_SAIL_SHA: ${{ inputs.pr_head_sha || github.sha }}
         run: |
           pin="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
           [[ "${pin}" =~ ^[0-9a-f]{40}$ ]]
           python scripts/ci/ppu_wheel_manifest.py verify wheels \
-            --vllm-commit "${pin}" --sail-commit "${GITHUB_SHA}"
+            --vllm-commit "${pin}" --sail-commit "${EXPECTED_SAIL_SHA}"
 
       - name: Run PPU E2E smoke
         uses: t-head/ppu-scheduler-action@main

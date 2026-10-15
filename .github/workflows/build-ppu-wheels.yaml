@@ -2,6 +2,24 @@ name: PPU CI
 
 on:
   pull_request:
+  workflow_call:
+    inputs:
+      execution_plan:
+        description: Hosted validator run-bound execution plan
+        required: true
+        type: string
+      pr_mode:
+        description: Validated on-demand PR execution
+        required: true
+        type: boolean
+      pr_number:
+        description: Validated PR number for concurrency isolation
+        required: true
+        type: string
+      pr_head_sha:
+        description: Validated immutable PR head SHA
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       existing_build_run_id:
@@ -39,18 +57,26 @@ permissions:
   contents: read
   actions: read
 
+cache-mode: none
+
 concurrency:
-  group: ppu-ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: ppu-ci-${{ github.event_name }}-${{ inputs.pr_number || github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ !inputs.pr_mode }}
 
 jobs:
   build:
-    if: inputs.existing_build_run_id == '' && github.event_name != 'workflow_dispatch'
+    if: >-
+      inputs.existing_build_run_id == '' &&
+      ((!inputs.pr_mode && github.event_name != 'workflow_dispatch') ||
+       (inputs.pr_mode && github.run_attempt == 1 &&
+        fromJSON(inputs.execution_plan).run_id == github.run_id &&
+        fromJSON(inputs.execution_plan).plan.build.mode == 'run'))
     name: PPU wheel build
     runs-on: k8s-runner-group-cpu-thead
     timeout-minutes: 180
     outputs:
       image: ${{ steps.image.outputs.image }}
+      artifact_id: ${{ steps.wheels.outputs.artifact-id }}
     container:
       image: ${{ inputs.build_image || 'reg.docker.alibaba-inc.com/ai-tmp/llm@sha256:24872709b1a84ec0e91260eeeccf6ae7ba52a6c70fb90f55a7aae1c1df503bcb' }}
     env:
@@ -79,10 +105,27 @@ jobs:
           echo "=== insteadOf after (global) ==="
           git config --global --get-regexp '^url\..*\.insteadof$' 2>/dev/null || echo none
 
+      - name: Require disabled cache access
+        uses: actions/github-script@v7
+        with:
+          script: |
+            if (process.env.ACTIONS_CACHE_MODE !== 'none') {
+              throw new Error('Actions cache access must be disabled');
+            }
+            console.log('Cache access verified: none');
+
       - name: Check out vLLM SAIL
         uses: actions/checkout@v4
         with:
           github-server-url: https://github.com
+          ref: ${{ inputs.pr_head_sha || github.sha }}
+          persist-credentials: false
+
+      - name: Verify the checked-out revision
+        shell: bash
+        env:
+          EXPECTED_SAIL_SHA: ${{ inputs.pr_head_sha || github.sha }}
+        run: test "$(git -c "safe.directory=$(pwd -P)" rev-parse HEAD)" = "$EXPECTED_SAIL_SHA"
 
       - name: Record build image for downstream tests
         id: image
@@ -92,9 +135,11 @@ jobs:
         run: bash scripts/ci/build_ppu_wheels.sh
 
       - name: Upload wheels
+        id: wheels
         if: success()
         uses: actions/upload-artifact@v4
         with:
+          overwrite: true
           name: ppu-wheels-${{ github.run_id }}
           path: artifacts/wheels/
           if-no-files-found: error
@@ -104,7 +149,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ppu-build-diagnostics-${{ github.run_id }}
+          name: ppu-build-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             artifacts/logs/**
             artifacts/build-manifest.txt
@@ -113,7 +158,7 @@ jobs:
 
   # This pipeline remains manual until both board types are qualified.
   detect-ops-changes:
-    if: github.event_name == 'workflow_dispatch' && inputs.existing_build_run_id == ''
+    if: ${{ !inputs.pr_mode && github.event_name == 'workflow_dispatch' && inputs.existing_build_run_id == '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -264,13 +309,26 @@ jobs:
   pin-unit-tests:
     name: PPU pin UT
     needs: build
-    if: ${{ !cancelled() && (needs.build.result == 'success' || (needs.build.result == 'skipped' && inputs.existing_build_run_id != '')) }}
+    if: >-
+      !cancelled() &&
+      ((!inputs.pr_mode && (needs.build.result == 'success' ||
+        (needs.build.result == 'skipped' && inputs.existing_build_run_id != ''))) ||
+       (inputs.pr_mode && github.run_attempt == 1 &&
+        fromJSON(inputs.execution_plan).run_id == github.run_id &&
+        fromJSON(inputs.execution_plan).plan.pin.mode == 'run' &&
+        (needs.build.result == 'success' || (needs.build.result == 'skipped' &&
+         fromJSON(inputs.execution_plan).plan.build.mode == 'reuse' &&
+         fromJSON(inputs.execution_plan).plan.build.source.artifact.id > 0))))
     permissions:
       contents: read
       actions: read
     uses: ./.github/workflows/ppu-pin-ut.yaml
     with:
-      build_run_id: ${{ inputs.existing_build_run_id || github.run_id }}
+      pr_mode: ${{ inputs.pr_mode == true }}
+      pr_head_sha: ${{ inputs.pr_head_sha }}
+      execution_plan: ${{ inputs.execution_plan }}
+      build_artifact_id: ${{ inputs.pr_mode && (needs.build.outputs.artifact_id || fromJSON(inputs.execution_plan).plan.build.source.artifact.id) || '' }}
+      build_run_id: ${{ inputs.pr_mode && fromJSON(inputs.execution_plan).plan.build.source.run_id || inputs.existing_build_run_id || github.run_id }}
       image: ${{ needs.build.outputs.image || inputs.build_image || 'reg.docker.alibaba-inc.com/ai-tmp/llm@sha256:24872709b1a84ec0e91260eeeccf6ae7ba52a6c70fb90f55a7aae1c1df503bcb' }}
 
   smoke:
@@ -278,31 +336,73 @@ jobs:
     needs: build
     # PR smoke and pin UT consume this run's wheels in separate fresh pods.
     # Manual artifact reuse remains available for pin-UT debugging only.
-    if: github.event_name == 'pull_request'
+    if: >-
+      !cancelled() &&
+      ((!inputs.pr_mode && github.event_name == 'pull_request' && needs.build.result == 'success') ||
+       (inputs.pr_mode && github.run_attempt == 1 &&
+        fromJSON(inputs.execution_plan).run_id == github.run_id &&
+        fromJSON(inputs.execution_plan).plan.smoke.mode == 'run' &&
+        (needs.build.result == 'success' || (needs.build.result == 'skipped' &&
+         fromJSON(inputs.execution_plan).plan.build.mode == 'reuse' &&
+         fromJSON(inputs.execution_plan).plan.build.source.artifact.id > 0))))
     uses: ./.github/workflows/e2e-ppu.yaml
     with:
-      build_run_id: ${{ github.run_id }}
-      image: ${{ needs.build.outputs.image }}
+      pr_mode: ${{ inputs.pr_mode == true }}
+      pr_head_sha: ${{ inputs.pr_head_sha }}
+      execution_plan: ${{ inputs.execution_plan }}
+      build_artifact_id: ${{ inputs.pr_mode && (needs.build.outputs.artifact_id || fromJSON(inputs.execution_plan).plan.build.source.artifact.id) || '' }}
+      build_run_id: ${{ inputs.pr_mode && fromJSON(inputs.execution_plan).plan.build.source.run_id || github.run_id }}
+      image: ${{ needs.build.outputs.image || 'reg.docker.alibaba-inc.com/ai-tmp/llm@sha256:24872709b1a84ec0e91260eeeccf6ae7ba52a6c70fb90f55a7aae1c1df503bcb' }}
 
   gate:
     name: PPU CI gate
     needs: [build, pin-unit-tests, smoke]
-    if: ${{ always() && github.event_name == 'pull_request' }}
+    if: ${{ always() && ((inputs.pr_mode && github.run_attempt == 1) || (!inputs.pr_mode && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Require every PPU stage to succeed
         env:
           JOB_RESULTS: ${{ toJSON(needs) }}
+          PR_MODE: ${{ inputs.pr_mode == true }}
+          EXECUTION_PLAN: ${{ inputs.execution_plan }}
         run: |
           python - <<'PYTHON'
           import json
           import os
+          import re
+
+          def require(condition, message):
+              if not condition:
+                  raise SystemExit(message)
 
           results = json.loads(os.environ["JOB_RESULTS"])
-          for job, result in results.items():
-              print(f"{job}: {result['result']}")
-          failed = [job for job, result in results.items() if result["result"] != "success"]
-          if failed:
-              raise SystemExit(f"Required PPU stages did not succeed: {', '.join(failed)}")
+          stages = {"build": "build", "pin": "pin-unit-tests", "smoke": "smoke"}
+          require(set(results) == set(stages.values()), "Missing required PPU stage")
+          plan = {stage: {"mode": "run"} for stage in stages}
+          if os.environ.get("PR_MODE") == "true":
+              validation = json.loads(os.environ["EXECUTION_PLAN"])
+              require(validation["run_id"] == int(os.environ["GITHUB_RUN_ID"])
+                      and validation["run_attempt"] == 1
+                      and os.environ["GITHUB_RUN_ATTEMPT"] == "1", "Invalid validator binding")
+              plan = validation["plan"]
+              require(set(plan) == set(stages), "Invalid execution stages")
+          for stage, job in stages.items():
+              entry = plan[stage]
+              mode = entry["mode"]
+              require(mode in {"run", "reuse"}, "Invalid stage mode")
+              expected = "success" if mode == "run" else "skipped"
+              if mode == "reuse":
+                  source = entry["source"]
+                  require(all(type(source[k]) is int and source[k] > 0
+                              for k in ("request_id", "run_id", "job_id"))
+                          and source["run_attempt"] == 1, "Missing reuse evidence")
+                  if stage == "build":
+                      artifact = source["artifact"]
+                      require(type(artifact["id"]) is int and artifact["id"] > 0
+                              and artifact["run_id"] == source["run_id"]
+                              and re.fullmatch(r"sha256:[0-9a-f]{64}", artifact["digest"]),
+                              "Missing immutable build artifact")
+              print(f"{job}: {results[job]['result']} ({mode})")
+              require(results[job]["result"] == expected, f"Required PPU stage failed: {job}")
           PYTHON

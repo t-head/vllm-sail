@@ -3,6 +3,8 @@ pytest-cov
 coverage
 ruff
 pre-commit
+# Bundle Node for CI JavaScript tests; do not depend on a system installation.
+nodejs-wheel-binaries==24.19.0
 # tests/ut/test_packaging.py builds real wheel/sdist artifacts without isolation.
 setuptools>=77.0.3,<81.0.0
 setuptools-scm>=8
