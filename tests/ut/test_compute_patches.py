@@ -98,11 +98,104 @@ def test_deep_gemm_helpers_are_rebound_to_the_ppu_wrapper(
 
 
 def test_kernel_warmup_patch_landed(installed) -> None:
+    import importlib
+
     import vllm_sail.patch.enhancement.kernel_warmup as kw_patch
+    from vllm_sail.patch.utils import PATCH_MARKER
 
     if not hasattr(kw_patch, "_upstream_kernel_warmup"):
         pytest.skip("kernel_warmup target module is not importable here")
     _patched("vllm.model_executor.warmup.kernel_warmup", "kernel_warmup")
+
+    if not hasattr(kw_patch, "_upstream_triton_compile"):
+        return
+    triton_helper = importlib.import_module(
+        "vllm.model_executor.warmup.jit_warmup_triton_helper"
+    )
+    for attribute, replacement in (
+        ("compile", kw_patch.vllm_triton_jit_kernel_compile),
+        ("compile_many", kw_patch.vllm_triton_jit_kernel_compile_many),
+    ):
+        patched = getattr(triton_helper.VllmTritonJitKernel, attribute)
+        assert patched is replacement
+        assert (
+            "vllm.model_executor.warmup.jit_warmup_triton_helper"
+            f".VllmTritonJitKernel.{attribute}"
+        ) in getattr(patched, PATCH_MARKER)
+
+
+def test_triton_compile_guard_skips_only_uncompilable_fp8(
+    monkeypatch: pytest.MonkeyPatch, installed
+) -> None:
+    import vllm_sail.patch.enhancement.kernel_warmup as kw_patch
+
+    if not hasattr(kw_patch, "_upstream_triton_compile"):
+        pytest.skip("jit_warmup_triton_helper target module is not importable here")
+
+    from vllm.platforms import current_platform
+
+    def compile_error(message):
+        def failing_compile(self, compile_key):
+            raise RuntimeError(message)
+
+        return failing_compile
+
+    def set_support(value):
+        monkeypatch.setattr(type(current_platform), "supports_fp8", lambda self: value)
+
+    guard = kw_patch.vllm_triton_jit_kernel_compile
+    fp8_error = "type fp8e4nv not supported in this architecture"
+    monkeypatch.setattr(kw_patch, "_upstream_triton_compile", compile_error(fp8_error))
+    set_support(False)
+    assert guard(object(), "key") is None
+    set_support(True)
+    with pytest.raises(RuntimeError, match="fp8e4nv"):
+        guard(object(), "key")
+
+    monkeypatch.setattr(kw_patch, "_upstream_triton_compile", compile_error("boom"))
+    set_support(False)
+    with pytest.raises(RuntimeError, match="boom"):
+        guard(object(), "key")
+
+    monkeypatch.setattr(kw_patch, "_upstream_triton_compile", lambda self, key: "ok")
+    assert guard(object(), "key") == "ok"
+
+
+def test_triton_compile_many_gate_drops_fp8_keys(
+    monkeypatch: pytest.MonkeyPatch, installed
+) -> None:
+    import types
+
+    import torch
+
+    import vllm_sail.patch.enhancement.kernel_warmup as kw_patch
+
+    if not hasattr(kw_patch, "_upstream_triton_compile_many"):
+        pytest.skip("jit_warmup_triton_helper target module is not importable here")
+
+    from vllm.platforms import current_platform
+
+    def key(dtype):
+        return types.SimpleNamespace(
+            inputs=(("q", types.SimpleNamespace(dtype=dtype)),)
+        )
+
+    fp8_key = key(torch.float8_e4m3fn)
+    bf16_key = key(torch.bfloat16)
+    seen = []
+    monkeypatch.setattr(
+        kw_patch, "_upstream_triton_compile_many", lambda self, keys: seen.extend(keys)
+    )
+    monkeypatch.setattr(type(current_platform), "is_ppu", lambda self: True)
+    monkeypatch.setattr(type(current_platform), "supports_fp8", lambda self: False)
+
+    gate = kw_patch.vllm_triton_jit_kernel_compile_many
+    gate(object(), [fp8_key, bf16_key])
+    assert seen == [bf16_key]
+
+    monkeypatch.setattr(type(current_platform), "supports_fp8", lambda self: True)
+    gate(object(), [fp8_key, bf16_key])
+    assert seen == [bf16_key, fp8_key, bf16_key]
 
 
 def test_ppu_deep_gemm_warmup_gate(monkeypatch: pytest.MonkeyPatch, installed) -> None:

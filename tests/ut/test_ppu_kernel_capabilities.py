@@ -400,6 +400,121 @@ def test_warmup_excludes_cutedsl_only_on_ppu(
 
 
 @pytest.mark.parametrize(
+    "supports_fp8,message,outcome",
+    [
+        (False, None, "compiled"),
+        (False, "type fp8e4nv not supported in this architecture", "skipped"),
+        (False, "out of shared memory", "raised"),
+        (True, "type fp8e4nv not supported in this architecture", "raised"),
+    ],
+)
+def test_triton_warmup_skips_uncompilable_fp8_only_without_platform_fp8(
+    modules, supports_fp8, message, outcome
+):
+    ns = types.SimpleNamespace
+    warnings = []
+    modules("vllm.platforms", current_platform=ns(supports_fp8=lambda: supports_fp8))
+    modules(
+        "vllm.logger",
+        init_logger=lambda _: ns(
+            info=lambda *a: None,
+            warning=lambda *a: warnings.append(a),
+        ),
+    )
+
+    class VllmTritonJitKernel:
+        def compile(self, compile_key):
+            if message is not None:
+                raise RuntimeError(message)
+            return "compiled"
+
+        def compile_many(self, compile_keys):
+            return list(compile_keys)
+
+    kernel_module = modules(
+        "vllm.model_executor.warmup.jit_warmup_triton_helper",
+        VllmTritonJitKernel=VllmTritonJitKernel,
+    )
+    modules(
+        "vllm.model_executor.warmup.kernel_warmup",
+        kernel_warmup=lambda *a, **k: None,
+        cutedsl_warmup=lambda: None,
+    )
+    modules("vllm.model_executor.warmup.cutedsl_warmup", cutedsl_warmup=lambda: None)
+    patched = load_patch("vllm_sail/patch/enhancement/kernel_warmup.py")
+    assert (
+        kernel_module.VllmTritonJitKernel.compile
+        is patched.vllm_triton_jit_kernel_compile
+    )
+    assert (
+        kernel_module.VllmTritonJitKernel.compile_many
+        is patched.vllm_triton_jit_kernel_compile_many
+    )
+    kernel = VllmTritonJitKernel()
+    if outcome == "raised":
+        with pytest.raises(RuntimeError, match=message):
+            kernel.compile("key")
+    else:
+        assert kernel.compile("key") == ("compiled" if outcome == "compiled" else None)
+    assert len(warnings) == (1 if outcome == "skipped" else 0)
+
+
+@pytest.mark.parametrize(
+    "is_ppu,supports_fp8,expected",
+    [
+        (True, False, ["bf16"]),
+        (True, True, ["fp8", "bf16"]),
+        (False, False, ["fp8", "bf16"]),
+    ],
+)
+def test_triton_warmup_gate_drops_fp8_keys_only_on_ppu_without_fp8(
+    modules, is_ppu, supports_fp8, expected
+):
+    ns = types.SimpleNamespace
+    infos = []
+    modules(
+        "vllm.platforms",
+        current_platform=ns(is_ppu=lambda: is_ppu, supports_fp8=lambda: supports_fp8),
+    )
+    modules(
+        "vllm.logger",
+        init_logger=lambda _: ns(
+            info=lambda *a: infos.append(a), warning=lambda *a: None
+        ),
+    )
+
+    fp8_key = ns(inputs=(("q", ns(dtype="torch.float8_e4m3fn")),))
+    bf16_key = ns(inputs=(("q", ns(dtype="torch.bfloat16")),))
+    keys = {"fp8": fp8_key, "bf16": bf16_key}
+
+    class VllmTritonJitKernel:
+        def compile(self, compile_key):
+            raise AssertionError("compile must not run for a gated key")
+
+        def compile_many(self, compile_keys):
+            return list(compile_keys)
+
+    kernel_module = modules(
+        "vllm.model_executor.warmup.jit_warmup_triton_helper",
+        VllmTritonJitKernel=VllmTritonJitKernel,
+    )
+    modules(
+        "vllm.model_executor.warmup.kernel_warmup",
+        kernel_warmup=lambda *a, **k: None,
+        cutedsl_warmup=lambda: None,
+    )
+    modules("vllm.model_executor.warmup.cutedsl_warmup", cutedsl_warmup=lambda: None)
+    patched = load_patch("vllm_sail/patch/enhancement/kernel_warmup.py")
+    assert (
+        kernel_module.VllmTritonJitKernel.compile_many
+        is patched.vllm_triton_jit_kernel_compile_many
+    )
+    kernel = VllmTritonJitKernel()
+    assert kernel.compile_many([fp8_key, bf16_key]) == [keys[name] for name in expected]
+    assert len(infos) == (1 if len(expected) == 1 else 0)
+
+
+@pytest.mark.parametrize(
     "arch,ppu,alibi,pinned,available,expected",
     [
         (80, True, False, None, (2, 3), 3),
