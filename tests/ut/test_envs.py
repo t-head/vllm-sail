@@ -43,6 +43,7 @@ def test_defaults_and_canonical_snapshot() -> None:
     expected.update({f"VLLM_SAIL_{key}": None for key in BACKENDS})
     expected["VLLM_DEEPEPLL_RECV_HOOK"] = True
     expected["PPU_SDK"] = "/usr/local/PPU_SDK"
+    expected["VLLM_GDN_DECODE_KERNEL"] = "auto"
     assert envs.snapshot() == expected
     assert set(envs.environment_variables) == set(expected)
     for suffix in (*BOOL_DEFAULTS, *BACKENDS):
