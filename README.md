@@ -1,3 +1,5 @@
+**This repository has been migrated to [vllm-project/vllm-sail](https://github.com/vllm-project/vllm-sail). All future development will continue there.**
+
 <h1 align="center">vLLM SAIL</h1>
 
 <p align="center">
